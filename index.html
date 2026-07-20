@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Checador de Comissão — Rede Gazeta</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<style>
+  :root{
+    --navy:#0d2340; --navy2:#16345c; --gold:#c9a227; --teal:#0f6e56;
+    --ok:#0f6e56; --okbg:#e1f5ee; --warn:#854f0b; --warnbg:#faeeda;
+    --err:#a32d2d; --errbg:#fcebeb; --gray:#5f5e5a; --line:#e2e2dd; --bg:#f5f4ef;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#1a1a18;background:var(--bg)}
+  .wrap{max-width:1200px;margin:0 auto;padding:24px}
+  header{background:var(--navy);color:#fff;padding:20px 24px;border-radius:12px;display:flex;align-items:center;gap:16px}
+  header .bar{width:4px;height:44px;background:var(--gold);border-radius:2px}
+  header h1{font-size:20px;margin:0;font-weight:600}
+  header p{margin:2px 0 0;font-size:13px;color:#b9c4d6}
+  .drop{background:#fff;border:1.5px dashed var(--line);border-radius:12px;padding:20px;text-align:center;transition:.15s}
+  .drop.has{border-color:var(--teal);border-style:solid}
+  .drop h3{margin:0 0 4px;font-size:14px}
+  .drop small{color:var(--gray)}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:16px 0}
+  .btn{display:inline-block;background:var(--navy);color:#fff;border:none;border-radius:8px;padding:9px 16px;font-size:14px;cursor:pointer}
+  .btn:hover{background:var(--navy2)}
+  .btn.gold{background:var(--gold);color:#3a2f06}
+  .btn:disabled{opacity:.4;cursor:not-allowed}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:16px 0}
+  .card{background:#fff;border:.5px solid var(--line);border-radius:10px;padding:14px}
+  .card .lbl{font-size:12px;color:var(--gray)}
+  .card .val{font-size:22px;font-weight:600;margin-top:4px}
+  table{width:100%;border-collapse:collapse;background:#fff;border-radius:10px;overflow:hidden;font-size:13px}
+  th,td{padding:9px 12px;text-align:left;border-bottom:.5px solid var(--line)}
+  th{background:var(--navy);color:#fff;font-weight:500;position:sticky;top:0}
+  td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+  .tag{display:inline-block;padding:2px 9px;border-radius:20px;font-size:11px;font-weight:600}
+  .tag.ok{background:var(--okbg);color:var(--ok)}
+  .tag.warn{background:var(--warnbg);color:var(--warn)}
+  .tag.err{background:var(--errbg);color:var(--err)}
+  .filters{display:flex;gap:8px;flex-wrap:wrap;margin:16px 0 10px}
+  .chip{padding:6px 14px;border:.5px solid var(--line);background:#fff;border-radius:20px;font-size:13px;cursor:pointer}
+  .chip.active{background:var(--navy);color:#fff;border-color:var(--navy)}
+  .tblwrap{max-height:520px;overflow:auto;border-radius:10px;border:.5px solid var(--line)}
+  .muted{color:var(--gray);font-size:13px}
+  .tol{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--gray)}
+  .tol input{width:80px;padding:6px 8px;border:.5px solid var(--line);border-radius:6px;text-align:right}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useMemo, useCallback } = React;
+
+function parseBRNumber(s){
+  if(s===null||s===undefined) return NaN;
+  if(typeof s === "number") return s;
+  var t = String(s).trim().replace(/\s/g,"");
+  if(!t) return NaN;
+  // formato BR: 1.234,56  -> remove pontos de milhar, troca vírgula por ponto
+  t = t.replace(/\./g,"").replace(",",".");
+  var n = parseFloat(t);
+  return isNaN(n)? NaN : n;
+}
+function fmt(n){
+  if(n===null||n===undefined||isNaN(n)) return "—";
+  return n.toLocaleString("pt-BR",{minimumFractionDigits:2,maximumFractionDigits:2});
+}
+function normInt(v){
+  if(v===null||v===undefined) return null;
+  var t = String(v).replace(/\D/g,"");
+  if(!t) return null;
+  return String(parseInt(t,10));
+}
+
+// ---- Parser do TXT (Relação de Comissões a Pagar) ----
+// Cada demonstrativo começa em "Numero da Comissao:" e termina no próximo (ou no fim).
+function parseTxt(text){
+  var blocks = [];
+  // Quebra por "Numero da Comissao:"
+  var parts = text.split(/(?=Numero da Comissao:)/);
+  parts.forEach(function(chunk){
+    if(chunk.indexOf("Numero da Comissao:") < 0) return;
+    var mNum = chunk.match(/Numero da Comissao:\s*(\d+)/);
+    var mEmp = chunk.match(/Empresa:\s*(\d+)\s*-\s*(.+)/);
+    var mComis = chunk.match(/Comis:\s*(\d+)\s*-\s*(.+)/);
+    var mForn = chunk.match(/Cod\.?\s*Fornecedor:\s*([\d\.]+)/i);
+    var mBruto = chunk.match(/Total\s+Bruto[.\s]*:\s*([\d\.,]+)/i);
+    var mIR = chunk.match(/Imposto de Renda[.\s]*:\s*([\d\.,]+)/i);
+    var mLiq = chunk.match(/Total\s+L[ií]quido[.\s]*:\s*([\d\.,]+)/i);
+    if(!mNum) return;
+    blocks.push({
+      numeroComissao: normInt(mNum[1]),
+      empCode: mEmp? normInt(mEmp[1]) : null,
+      empNome: mEmp? mEmp[2].trim() : "",
+      comisCode: mComis? normInt(mComis[1]) : null,
+      comisNome: mComis? mComis[2].trim() : "",
+      codFornecedor: mForn? normInt(mForn[1]) : null,
+      totalBruto: mBruto? parseBRNumber(mBruto[1]) : NaN,
+      ir: mIR? parseBRNumber(mIR[1]) : NaN,
+      totalLiquido: mLiq? parseBRNumber(mLiq[1]) : NaN
+    });
+  });
+  return blocks;
+}
+
+// ---- Parser do Excel TOTVS ----
+// Acha a linha de cabeçalho (Emp / Título / Vl Original) e lê só espécie CO.
+function parseXlsx(arrayBuffer){
+  var wb = XLSX.read(arrayBuffer,{type:"array",cellDates:true});
+  var ws = wb.Sheets[wb.SheetNames[0]];
+  var rows = XLSX.utils.sheet_to_json(ws,{header:1,raw:true,defval:null});
+  var headerIdx = -1, cols = {};
+  for(var i=0;i<rows.length;i++){
+    var r = rows[i].map(function(c){return c===null?"":String(c).trim().toLowerCase();});
+    if(r.indexOf("título")>=0 || r.indexOf("titulo")>=0 || (r.indexOf("emp")>=0 && r.indexOf("esp")>=0)){
+      headerIdx = i;
+      r.forEach(function(h,idx){
+        if(h==="emp") cols.emp=idx;
+        else if(h==="est") cols.est=idx;
+        else if(h==="esp") cols.esp=idx;
+        else if(h==="fornec"||h==="fornecedor") cols.fornec=idx;
+        else if(h==="título"||h==="titulo") cols.titulo=idx;
+        else if(h==="/p"||h==="parcela") cols.parc=idx;
+        else if(h.indexOf("vencto")>=0||h.indexOf("vencimento")>=0) cols.vencto=idx;
+        else if(h.indexOf("vl original")>=0 && h.indexOf("apr")<0) cols.vlOrig=idx;
+        else if(h.indexOf("vl orig apr")>=0) cols.vlAprov=idx;
+      });
+      break;
+    }
+  }
+  if(headerIdx<0) throw new Error("Não encontrei o cabeçalho (Emp/Título/Vl Original) no Excel.");
+  var out = [];
+  for(var j=headerIdx+1;j<rows.length;j++){
+    var row = rows[j];
+    if(!row) continue;
+    var esp = cols.esp!=null? row[cols.esp] : null;
+    if(!esp || String(esp).trim().toUpperCase()!=="CO") continue; // só comissão
+    var titulo = normInt(row[cols.titulo]);
+    if(!titulo) continue;
+    var venc = cols.vencto!=null? row[cols.vencto] : null;
+    out.push({
+      empCode: normInt(row[cols.emp]),
+      esp: "CO",
+      fornec: cols.fornec!=null? normInt(row[cols.fornec]) : null,
+      titulo: titulo,
+      parcela: cols.parc!=null? (row[cols.parc]||"") : "",
+      vencto: (venc instanceof Date)? venc : null,
+      vlOriginal: parseBRNumber(row[cols.vlOrig])
+    });
+  }
+  return out;
+}
+
+// ---- Reconciliação: chave Empresa + Título(=Nº Comissão) ----
+function reconcile(txtBlocks, totvsRows, tol){
+  var totvsByKey = {};
+  totvsRows.forEach(function(t){
+    var k = t.empCode + "|" + t.titulo;
+    if(!totvsByKey[k]) totvsByKey[k] = [];
+    totvsByKey[k].push(t);
+  });
+  var usedKeys = {};
+  var results = [];
+  txtBlocks.forEach(function(b){
+    var k = b.empCode + "|" + b.numeroComissao;
+    var matches = totvsByKey[k] || [];
+    var bruto = b.totalBruto;
+    var ir = isNaN(b.ir) ? 0 : b.ir;
+    var liquido = isNaN(b.totalLiquido) ? (bruto - ir) : b.totalLiquido;
+    if(matches.length){
+      usedKeys[k] = true;
+      var somaTotvs = matches.reduce(function(a,m){return a + (isNaN(m.vlOriginal)?0:m.vlOriginal);},0);
+      var diff = liquido - somaTotvs; // TOTVS registra o líquido (já com IR retido)
+      var status = Math.abs(diff) <= tol ? "OK" : "DIVERGE";
+      results.push({
+        status: status, empCode: b.empCode, empNome: b.empNome,
+        numeroComissao: b.numeroComissao, comisNome: b.comisNome,
+        fornecTotvs: matches.map(function(m){return m.fornec;}).join(", "),
+        bruto: bruto, ir: ir, liquido: liquido, valorTotvs: somaTotvs, diff: diff,
+        vencto: matches[0].vencto, nTitulos: matches.length
+      });
+    } else {
+      results.push({
+        status:"SO_TXT", empCode:b.empCode, empNome:b.empNome,
+        numeroComissao:b.numeroComissao, comisNome:b.comisNome,
+        fornecTotvs:"", bruto:bruto, ir:ir, liquido:liquido, valorTotvs:NaN, diff:NaN, vencto:null, nTitulos:0
+      });
+    }
+  });
+  // Títulos CO no TOTVS que não têm demonstrativo no TXT
+  Object.keys(totvsByKey).forEach(function(k){
+    if(usedKeys[k]) return;
+    var arr = totvsByKey[k];
+    var soma = arr.reduce(function(a,m){return a+(isNaN(m.vlOriginal)?0:m.vlOriginal);},0);
+    results.push({
+      status:"SO_TOTVS", empCode:arr[0].empCode, empNome:"",
+      numeroComissao:arr[0].titulo, comisNome:"", fornecTotvs:arr.map(function(m){return m.fornec;}).join(", "),
+      bruto:NaN, ir:NaN, liquido:NaN, valorTotvs:soma, diff:NaN, vencto:arr[0].vencto, nTitulos:arr.length
+    });
+  });
+  return results;
+}
+
+function Drop({label, hint, fileName, onFile, accept, multiple}){
+  var ref = React.useRef();
+  return (
+    <div className={"drop"+(fileName?" has":"")}>
+      <h3>{label}</h3>
+      <small>{fileName ? ("✓ "+fileName) : hint}</small>
+      <div style={{marginTop:10}}>
+        <button className="btn" onClick={function(){ref.current.click();}}>{multiple?"Selecionar arquivos":"Selecionar arquivo"}</button>
+        <input ref={ref} type="file" accept={accept} multiple={multiple?true:false} style={{display:"none"}}
+          onChange={function(e){ if(e.target.files.length) onFile(multiple?e.target.files:e.target.files[0]); }} />
+      </div>
+    </div>
+  );
+}
+
+function App(){
+  const [txtName,setTxtName]=useState("");
+  const [xlsName,setXlsName]=useState("");
+  const [txtBlocks,setTxtBlocks]=useState(null);
+  const [totvsRows,setTotvsRows]=useState(null);
+  const [tol,setTol]=useState(0.01);
+  const [filter,setFilter]=useState("ALL");
+  const [err,setErr]=useState("");
+
+  const loadTxt = useCallback(function(fileList){
+    setErr("");
+    var files = Array.prototype.slice.call(fileList.length!==undefined && !fileList.name ? fileList : [fileList]);
+    var dec = new TextDecoder("windows-1252");
+    var readOne = function(file){
+      return new Promise(function(resolve,reject){
+        var reader = new FileReader();
+        reader.onload = function(){
+          try{ resolve(parseTxt(dec.decode(reader.result)).map(function(b){b.sourceFile=file.name;return b;})); }
+          catch(e){ reject(e); }
+        };
+        reader.onerror = function(){ reject(new Error("Falha ao ler "+file.name)); };
+        reader.readAsArrayBuffer(file);
+      });
+    };
+    Promise.all(files.map(readOne)).then(function(lists){
+      var all = [].concat.apply([], lists);
+      // dedupe por Empresa + Nº Comissão (mesmo demonstrativo em 2 arquivos)
+      var seen = {}, dedup = [], dups = 0;
+      all.forEach(function(b){
+        var k = b.empCode + "|" + b.numeroComissao;
+        if(seen[k]){ dups++; return; }
+        seen[k] = true; dedup.push(b);
+      });
+      if(!dedup.length){ setErr("Nenhum demonstrativo encontrado nos TXT."); return; }
+      setTxtBlocks(dedup);
+      setTxtName(files.length + " arquivo(s) · " + dedup.length + " demonstrativo(s)" + (dups?(" · "+dups+" duplicado(s) ignorado(s)"):""));
+    }).catch(function(e){ setErr("Erro no TXT: "+e.message); });
+  },[]);
+
+  const loadXls = useCallback(function(file){
+    setErr("");
+    var reader = new FileReader();
+    reader.onload = function(){
+      try{
+        var rows = parseXlsx(reader.result);
+        if(!rows.length){ setErr("Nenhum título espécie CO encontrado no Excel."); return; }
+        setTotvsRows(rows); setXlsName(file.name);
+      }catch(e){ setErr("Erro no Excel: "+e.message); }
+    };
+    reader.readAsArrayBuffer(file);
+  },[]);
+
+  const results = useMemo(function(){
+    if(!txtBlocks||!totvsRows) return null;
+    return reconcile(txtBlocks, totvsRows, tol);
+  },[txtBlocks,totvsRows,tol]);
+
+  const stats = useMemo(function(){
+    if(!results) return null;
+    var s={OK:0,DIVERGE:0,SO_TXT:0,SO_TOTVS:0,bruto:0,ir:0,liquido:0,valTotvs:0};
+    results.forEach(function(r){
+      s[r.status]++;
+      if(!isNaN(r.bruto)) s.bruto+=r.bruto;
+      if(!isNaN(r.ir)) s.ir+=r.ir;
+      if(!isNaN(r.liquido)) s.liquido+=r.liquido;
+      if(!isNaN(r.valorTotvs)) s.valTotvs+=r.valorTotvs;
+    });
+    return s;
+  },[results]);
+
+  const shown = useMemo(function(){
+    if(!results) return [];
+    if(filter==="ALL") return results;
+    return results.filter(function(r){return r.status===filter;});
+  },[results,filter]);
+
+  const exportCsv = useCallback(function(){
+    if(!results) return;
+    var head = ["Status","Empresa","Nome Empresa","Nº Comissão / Título","Comissionado","Fornec TOTVS","Bruto TXT","IR","Líquido TXT","Vl Original TOTVS","Diferença","Vencimento","Qtd Títulos"];
+    var lines = [head.join(";")];
+    results.forEach(function(r){
+      var v = r.vencto? (("0"+r.vencto.getDate()).slice(-2)+"/"+("0"+(r.vencto.getMonth()+1)).slice(-2)+"/"+r.vencto.getFullYear()) : "";
+      lines.push([r.status,r.empCode,'"'+r.empNome+'"',r.numeroComissao,'"'+r.comisNome+'"','"'+r.fornecTotvs+'"',
+        isNaN(r.bruto)?"":fmt(r.bruto),isNaN(r.ir)?"":fmt(r.ir),isNaN(r.liquido)?"":fmt(r.liquido),
+        isNaN(r.valorTotvs)?"":fmt(r.valorTotvs),isNaN(r.diff)?"":fmt(r.diff),v,r.nTitulos].join(";"));
+    });
+    var blob = new Blob(["\ufeff"+lines.join("\n")],{type:"text/csv;charset=utf-8"});
+    var a=document.createElement("a"); a.href=URL.createObjectURL(blob);
+    a.download="checagem_comissao.csv"; a.click();
+  },[results]);
+
+  function tagOf(st){
+    if(st==="OK") return <span className="tag ok">OK</span>;
+    if(st==="DIVERGE") return <span className="tag err">DIVERGE</span>;
+    if(st==="SO_TXT") return <span className="tag warn">Só no TXT</span>;
+    return <span className="tag warn">Só no TOTVS</span>;
+  }
+  function vencStr(d){ return d? (("0"+d.getDate()).slice(-2)+"/"+("0"+(d.getMonth()+1)).slice(-2)+"/"+d.getFullYear()) : "—"; }
+
+  return (
+    <div className="wrap">
+      <header>
+        <div className="bar"></div>
+        <div>
+          <h1>Checador de Comissão Registrada</h1>
+          <p>Confronta o demonstrativo (TXT) com os títulos espécie CO do TOTVS · Rede Gazeta</p>
+        </div>
+      </header>
+
+      <div className="grid2">
+        <Drop label="1. Relações de Comissões (.TXT)" hint="Um ou vários demonstrativos — pode selecionar todos de uma vez"
+          fileName={txtName} onFile={loadTxt} accept=".txt,.TXT" multiple={true} />
+        <Drop label="2. Contas a Pagar TOTVS (.xlsx)" hint="Export com espécie CO e Vl Original"
+          fileName={xlsName} onFile={loadXls} accept=".xlsx,.xls" />
+      </div>
+
+      {err ? <div className="card" style={{borderColor:"var(--err)",color:"var(--err)"}}>{err}</div> : null}
+
+      {results ? (
+        <div>
+          <div className="cards">
+            <div className="card"><div className="lbl">Casados OK</div><div className="val" style={{color:"var(--ok)"}}>{stats.OK}</div></div>
+            <div className="card"><div className="lbl">Divergentes</div><div className="val" style={{color:"var(--err)"}}>{stats.DIVERGE}</div></div>
+            <div className="card"><div className="lbl">Só no TXT</div><div className="val" style={{color:"var(--warn)"}}>{stats.SO_TXT}</div></div>
+            <div className="card"><div className="lbl">Só no TOTVS</div><div className="val" style={{color:"var(--warn)"}}>{stats.SO_TOTVS}</div></div>
+            <div className="card"><div className="lbl">Bruto TXT</div><div className="val">{fmt(stats.bruto)}</div></div>
+            <div className="card"><div className="lbl">IR retido</div><div className="val" style={{color:"var(--gold)"}}>{fmt(stats.ir)}</div></div>
+            <div className="card"><div className="lbl">Líquido TXT</div><div className="val">{fmt(stats.liquido)}</div></div>
+            <div className="card"><div className="lbl">Total TOTVS</div><div className="val">{fmt(stats.valTotvs)}</div></div>
+          </div>
+
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:12}}>
+            <div className="tol">
+              Tolerância de valor: R$
+              <input type="number" step="0.01" value={tol}
+                onChange={function(e){setTol(parseBRNumber(e.target.value)||0);}} />
+            </div>
+            <button className="btn gold" onClick={exportCsv}>Exportar CSV</button>
+          </div>
+
+          <div className="filters">
+            {[["ALL","Todos"],["DIVERGE","Divergentes"],["OK","OK"],["SO_TXT","Só no TXT"],["SO_TOTVS","Só no TOTVS"]].map(function(f){
+              return <div key={f[0]} className={"chip"+(filter===f[0]?" active":"")} onClick={function(){setFilter(f[0]);}}>{f[1]}</div>;
+            })}
+          </div>
+
+          <div className="tblwrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Status</th><th>Emp</th><th>Nº Comissão / Título</th><th>Comissionado</th>
+                  <th>Fornec TOTVS</th><th className="num">Bruto (TXT)</th><th className="num">IR</th>
+                  <th className="num">Líquido (TXT)</th><th className="num">Vl Original (TOTVS)</th>
+                  <th className="num">Diferença</th><th>Vencto</th>
+                </tr>
+              </thead>
+              <tbody>
+                {shown.map(function(r,i){
+                  return (
+                    <tr key={i}>
+                      <td>{tagOf(r.status)}</td>
+                      <td>{r.empCode}{r.empNome?(" - "+r.empNome):""}</td>
+                      <td>{r.numeroComissao}{r.nTitulos>1?(" ("+r.nTitulos+" tít.)"):""}</td>
+                      <td>{r.comisNome||"—"}</td>
+                      <td>{r.fornecTotvs||"—"}</td>
+                      <td className="num">{fmt(r.bruto)}</td>
+                      <td className="num" style={{color:(!isNaN(r.ir)&&r.ir>0)?"var(--gold)":"inherit"}}>{fmt(r.ir)}</td>
+                      <td className="num">{fmt(r.liquido)}</td>
+                      <td className="num">{fmt(r.valorTotvs)}</td>
+                      <td className="num" style={{color: (!isNaN(r.diff)&&Math.abs(r.diff)>tol)?"var(--err)":"inherit"}}>{fmt(r.diff)}</td>
+                      <td>{vencStr(r.vencto)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <p className="muted" style={{marginTop:10}}>
+            Chave de casamento: <b>Empresa + Número da Comissão = Título (espécie CO)</b>. O TOTVS registra o valor <b>líquido</b> (já com IR retido), então a diferença compara <b>Líquido (TXT) × Vl Original (TOTVS)</b>. A coluna IR mostra a retenção — quando ela é a única razão do descasamento, a linha fica OK.
+          </p>
+        </div>
+      ) : (
+        <p className="muted" style={{marginTop:24}}>Carregue os dois arquivos para rodar a checagem.</p>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
