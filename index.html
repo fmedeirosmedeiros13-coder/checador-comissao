@@ -8,6 +8,7 @@
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <style>
   :root{
     --navy:#0d2340; --navy2:#16345c; --gold:#c9a227; --teal:#0f6e56;
@@ -26,6 +27,7 @@
   .drop h3{margin:0 0 4px;font-size:14px}
   .drop small{color:var(--gray)}
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:16px 0}
+  .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;margin:16px 0}
   .btn{display:inline-block;background:var(--navy);color:#fff;border:none;border-radius:8px;padding:9px 16px;font-size:14px;cursor:pointer}
   .btn:hover{background:var(--navy2)}
   .btn.gold{background:var(--gold);color:#3a2f06}
@@ -156,8 +158,65 @@ function parseXlsx(arrayBuffer){
   return out;
 }
 
+// ---- Extrai texto de um PDF (pdf.js) ----
+function pdfToText(arrayBuffer){
+  return pdfjsLib.getDocument({data: arrayBuffer}).promise.then(function(pdf){
+    var pages = [];
+    for(var p=1;p<=pdf.numPages;p++){ pages.push(p); }
+    return pages.reduce(function(chain, p){
+      return chain.then(function(acc){
+        return pdf.getPage(p).then(function(page){
+          return page.getTextContent().then(function(c){
+            return acc + c.items.map(function(i){return i.str;}).join(" ") + "\n";
+          });
+        });
+      });
+    }, Promise.resolve(""));
+  });
+}
+
+// ---- Parser da NFS-e (texto extraído) ----
+// Extrai todos os "Numero da Comissao", o Valor Serviço (= bruto), líquido, tomador e nº RPS.
+function parseNf(text, fileName){
+  var comSet = {};
+  var re = /N[uú]mero da Comiss[aã]o[:\s]*([0-9]+)/gi, m;
+  while((m = re.exec(text)) !== null){
+    var n = normInt(m[1]);
+    if(n) comSet[n] = true;
+  }
+  var comissoes = Object.keys(comSet);
+  var mVs = text.match(/VALOR SERVI[ÇC]O[\s\S]{0,200}?([\d.]+,\d{2})/i);
+  var mVl = text.match(/VALOR L[IÍ]QUIDO[\s\S]{0,200}?([\d.]+,\d{2})/i);
+  var razoes = [];
+  var reR = /Raz[aã]o Social:\s*([^\n\r]+)/gi, mr;
+  while((mr = reR.exec(text)) !== null){ razoes.push(mr[1].trim()); }
+  var mRps = text.match(/N[uú]mero RPS[\s\S]{0,40}?(\d{3,})/i);
+  return {
+    fileName: fileName,
+    comissoes: comissoes,
+    valorServico: mVs ? parseBRNumber(mVs[1]) : NaN,
+    valorLiquido: mVl ? parseBRNumber(mVl[1]) : NaN,
+    prestador: razoes.length > 0 ? razoes[0] : "",
+    tomador: razoes.length > 1 ? razoes[1] : "",
+    rps: mRps ? mRps[1] : (fileName || "").replace(/\D/g,"").slice(0,6)
+  };
+}
+
+// tokens úteis pra comparar tomador (NF) x empresa (demonstrativo)
+function nameTokens(s){
+  return String(s||"").toUpperCase()
+    .replace(/LTDA|S\/A|S\.A|EIRELI|ME|EPP|COMUNICA[ÇC][AÃ]O|R[AÁ]DIO|TELEVIS[AÃ]O|E TV|DE|E|DA|DO|DAS|DOS/g," ")
+    .replace(/[^A-Z0-9 ]/g," ").split(/\s+/).filter(function(t){return t.length>=3;});
+}
+function nameOverlap(a,b){
+  var ta=nameTokens(a), tb=nameTokens(b), set={}, hit=0;
+  ta.forEach(function(t){set[t]=true;});
+  tb.forEach(function(t){if(set[t]) hit++;});
+  return hit;
+}
+
 // ---- Reconciliação: chave Empresa + Título(=Nº Comissão) ----
-function reconcile(txtBlocks, totvsRows, tol){
+function reconcile(txtBlocks, totvsRows, nfList, tol){
   var totvsByKey = {};
   totvsRows.forEach(function(t){
     var k = t.empCode + "|" + t.titulo;
@@ -172,25 +231,25 @@ function reconcile(txtBlocks, totvsRows, tol){
     var bruto = b.totalBruto;
     var ir = isNaN(b.ir) ? 0 : b.ir;
     var liquido = isNaN(b.totalLiquido) ? (bruto - ir) : b.totalLiquido;
+    var base = {
+      empCode: b.empCode, empNome: b.empNome,
+      numeroComissao: b.numeroComissao, comisNome: b.comisNome,
+      bruto: bruto, ir: ir, liquido: liquido,
+      nfRps: "", nfStatus: "SEM_NF"
+    };
     if(matches.length){
       usedKeys[k] = true;
       var somaTotvs = matches.reduce(function(a,m){return a + (isNaN(m.vlOriginal)?0:m.vlOriginal);},0);
       var diff = liquido - somaTotvs; // TOTVS registra o líquido (já com IR retido)
-      var status = Math.abs(diff) <= tol ? "OK" : "DIVERGE";
-      results.push({
-        status: status, empCode: b.empCode, empNome: b.empNome,
-        numeroComissao: b.numeroComissao, comisNome: b.comisNome,
-        fornecTotvs: matches.map(function(m){return m.fornec;}).join(", "),
-        bruto: bruto, ir: ir, liquido: liquido, valorTotvs: somaTotvs, diff: diff,
-        vencto: matches[0].vencto, nTitulos: matches.length
-      });
+      base.status = Math.abs(diff) <= tol ? "OK" : "DIVERGE";
+      base.fornecTotvs = matches.map(function(m){return m.fornec;}).join(", ");
+      base.valorTotvs = somaTotvs; base.diff = diff;
+      base.vencto = matches[0].vencto; base.nTitulos = matches.length;
     } else {
-      results.push({
-        status:"SO_TXT", empCode:b.empCode, empNome:b.empNome,
-        numeroComissao:b.numeroComissao, comisNome:b.comisNome,
-        fornecTotvs:"", bruto:bruto, ir:ir, liquido:liquido, valorTotvs:NaN, diff:NaN, vencto:null, nTitulos:0
-      });
+      base.status = "SO_TXT"; base.fornecTotvs = "";
+      base.valorTotvs = NaN; base.diff = NaN; base.vencto = null; base.nTitulos = 0;
     }
+    results.push(base);
   });
   // Títulos CO no TOTVS que não têm demonstrativo no TXT
   Object.keys(totvsByKey).forEach(function(k){
@@ -200,10 +259,55 @@ function reconcile(txtBlocks, totvsRows, tol){
     results.push({
       status:"SO_TOTVS", empCode:arr[0].empCode, empNome:"",
       numeroComissao:arr[0].titulo, comisNome:"", fornecTotvs:arr.map(function(m){return m.fornec;}).join(", "),
-      bruto:NaN, ir:NaN, liquido:NaN, valorTotvs:soma, diff:NaN, vencto:arr[0].vencto, nTitulos:arr.length
+      bruto:NaN, ir:NaN, liquido:NaN, valorTotvs:soma, diff:NaN, vencto:arr[0].vencto, nTitulos:arr.length,
+      nfRps:"", nfStatus:"SO_TOTVS"
     });
   });
-  return results;
+
+  // ---- Camada NF: casa por Número da Comissão (tomador desempata colisão de empresa) ----
+  var demByNum = {};
+  results.forEach(function(r){
+    if(r.status === "SO_TOTVS") return;
+    (demByNum[r.numeroComissao] = demByNum[r.numeroComissao] || []).push(r);
+  });
+  var nfs = [];
+  (nfList || []).forEach(function(nf){
+    var cited = [];   // demonstrativos casados
+    var orfaos = [];  // números citados sem demonstrativo
+    nf.comissoes.forEach(function(num){
+      var cand = demByNum[num] || [];
+      var pick = null;
+      if(cand.length === 1){ pick = cand[0]; }
+      else if(cand.length > 1){
+        // colisão entre empresas: escolhe a empresa cujo nome mais casa com o tomador
+        var best = -1;
+        cand.forEach(function(c){ var ov = nameOverlap(c.empNome, nf.tomador); if(ov > best){ best = ov; pick = c; } });
+      }
+      if(pick){ cited.push(pick); }
+      else { orfaos.push(num); }
+    });
+    var somaBruto = cited.reduce(function(a,c){return a + (isNaN(c.bruto)?0:c.bruto);},0);
+    var valorNf = !isNaN(nf.valorServico) ? nf.valorServico : nf.valorLiquido;
+    var diffNf = valorNf - somaBruto;
+    var status;
+    if(cited.length === 0){ status = "ORFA"; }
+    else if(orfaos.length > 0){ status = "PARCIAL"; }
+    else if(Math.abs(diffNf) <= tol){ status = "NF_OK"; }
+    else { status = "NF_DIVERGE"; }
+    // anota nos demonstrativos cobertos
+    cited.forEach(function(c){
+      c.nfRps = c.nfRps ? (c.nfRps + ", " + nf.rps) : nf.rps;
+      c.nfStatus = (status === "NF_OK") ? "NF_OK" : (status === "NF_DIVERGE" ? "NF_DIVERGE" : c.nfStatus);
+      if(c.nfStatus === "SEM_NF") c.nfStatus = "NF_OK"; // coberta, sem divergência específica
+    });
+    nfs.push({
+      rps: nf.rps, fileName: nf.fileName, tomador: nf.tomador, prestador: nf.prestador,
+      comissoes: nf.comissoes, orfaos: orfaos, valorNf: valorNf, somaBruto: somaBruto,
+      diffNf: diffNf, status: status
+    });
+  });
+
+  return { rows: results, nfs: nfs };
 }
 
 function Drop({label, hint, fileName, onFile, accept, multiple}){
@@ -224,8 +328,10 @@ function Drop({label, hint, fileName, onFile, accept, multiple}){
 function App(){
   const [txtName,setTxtName]=useState("");
   const [xlsName,setXlsName]=useState("");
+  const [nfName,setNfName]=useState("");
   const [txtBlocks,setTxtBlocks]=useState(null);
   const [totvsRows,setTotvsRows]=useState(null);
+  const [nfList,setNfList]=useState(null);
   const [tol,setTol]=useState(0.01);
   const [filter,setFilter]=useState("ALL");
   const [err,setErr]=useState("");
@@ -273,39 +379,71 @@ function App(){
     reader.readAsArrayBuffer(file);
   },[]);
 
+  const loadNf = useCallback(function(fileList){
+    setErr("");
+    try{ pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"; }catch(e){}
+    var files = Array.prototype.slice.call(fileList.length!==undefined && !fileList.name ? fileList : [fileList]);
+    var readOne = function(file){
+      return new Promise(function(resolve,reject){
+        var reader = new FileReader();
+        reader.onload = function(){
+          pdfToText(new Uint8Array(reader.result)).then(function(text){
+            resolve(parseNf(text, file.name));
+          }).catch(reject);
+        };
+        reader.onerror = function(){ reject(new Error("Falha ao ler "+file.name)); };
+        reader.readAsArrayBuffer(file);
+      });
+    };
+    Promise.all(files.map(readOne)).then(function(list){
+      var comTotal = list.reduce(function(a,n){return a + n.comissoes.length;},0);
+      setNfList(list);
+      setNfName(files.length + " NF(s) · " + comTotal + " nº de comissão citado(s)");
+    }).catch(function(e){ setErr("Erro na NF (PDF): "+(e && e.message ? e.message : e)); });
+  },[]);
+
   const results = useMemo(function(){
     if(!txtBlocks||!totvsRows) return null;
-    return reconcile(txtBlocks, totvsRows, tol);
-  },[txtBlocks,totvsRows,tol]);
+    return reconcile(txtBlocks, totvsRows, nfList || [], tol);
+  },[txtBlocks,totvsRows,nfList,tol]);
 
   const stats = useMemo(function(){
     if(!results) return null;
-    var s={OK:0,DIVERGE:0,SO_TXT:0,SO_TOTVS:0,bruto:0,ir:0,liquido:0,valTotvs:0};
-    results.forEach(function(r){
+    var s={OK:0,DIVERGE:0,SO_TXT:0,SO_TOTVS:0,bruto:0,ir:0,liquido:0,valTotvs:0,SEM_NF:0,COM_NF:0,NF_DIVERGE:0};
+    results.rows.forEach(function(r){
       s[r.status]++;
       if(!isNaN(r.bruto)) s.bruto+=r.bruto;
       if(!isNaN(r.ir)) s.ir+=r.ir;
       if(!isNaN(r.liquido)) s.liquido+=r.liquido;
       if(!isNaN(r.valorTotvs)) s.valTotvs+=r.valorTotvs;
+      if(r.status!=="SO_TOTVS"){
+        if(r.nfStatus==="SEM_NF") s.SEM_NF++;
+        else if(r.nfStatus==="NF_DIVERGE") s.NF_DIVERGE++;
+        else if(r.nfStatus==="NF_OK") s.COM_NF++;
+      }
     });
+    s.nfOrfas = results.nfs.filter(function(n){return n.status==="ORFA"||n.status==="PARCIAL";}).length;
     return s;
   },[results]);
 
   const shown = useMemo(function(){
     if(!results) return [];
-    if(filter==="ALL") return results;
-    return results.filter(function(r){return r.status===filter;});
+    if(filter==="ALL") return results.rows;
+    if(filter==="SEM_NF") return results.rows.filter(function(r){return r.status!=="SO_TOTVS" && r.nfStatus==="SEM_NF";});
+    if(filter==="NF_DIVERGE") return results.rows.filter(function(r){return r.nfStatus==="NF_DIVERGE";});
+    return results.rows.filter(function(r){return r.status===filter;});
   },[results,filter]);
 
   const exportCsv = useCallback(function(){
     if(!results) return;
-    var head = ["Status","Empresa","Nome Empresa","Nº Comissão / Título","Comissionado","Fornec TOTVS","Bruto TXT","IR","Líquido TXT","Vl Original TOTVS","Diferença","Vencimento","Qtd Títulos"];
+    var head = ["Status TOTVS","Empresa","Nome Empresa","Nº Comissão / Título","Comissionado","Fornec TOTVS","Bruto TXT","IR","Líquido TXT","Vl Original TOTVS","Diferença TOTVS","NF (RPS)","Situação NF","Vencimento","Qtd Títulos"];
     var lines = [head.join(";")];
-    results.forEach(function(r){
+    results.rows.forEach(function(r){
       var v = r.vencto? (("0"+r.vencto.getDate()).slice(-2)+"/"+("0"+(r.vencto.getMonth()+1)).slice(-2)+"/"+r.vencto.getFullYear()) : "";
       lines.push([r.status,r.empCode,'"'+r.empNome+'"',r.numeroComissao,'"'+r.comisNome+'"','"'+r.fornecTotvs+'"',
         isNaN(r.bruto)?"":fmt(r.bruto),isNaN(r.ir)?"":fmt(r.ir),isNaN(r.liquido)?"":fmt(r.liquido),
-        isNaN(r.valorTotvs)?"":fmt(r.valorTotvs),isNaN(r.diff)?"":fmt(r.diff),v,r.nTitulos].join(";"));
+        isNaN(r.valorTotvs)?"":fmt(r.valorTotvs),isNaN(r.diff)?"":fmt(r.diff),
+        '"'+(r.nfRps||"")+'"', r.nfStatus||"", v, r.nTitulos].join(";"));
     });
     var blob = new Blob(["\ufeff"+lines.join("\n")],{type:"text/csv;charset=utf-8"});
     var a=document.createElement("a"); a.href=URL.createObjectURL(blob);
@@ -318,6 +456,17 @@ function App(){
     if(st==="SO_TXT") return <span className="tag warn">Só no TXT</span>;
     return <span className="tag warn">Só no TOTVS</span>;
   }
+  function tagNf(st){
+    if(st==="NF_OK") return <span className="tag ok">NF ok</span>;
+    if(st==="NF_DIVERGE") return <span className="tag err">NF diverge</span>;
+    return <span className="tag warn">sem NF</span>;
+  }
+  function tagNfRow(st){
+    if(st==="NF_OK") return <span className="tag ok">OK</span>;
+    if(st==="NF_DIVERGE") return <span className="tag err">Valor diverge</span>;
+    if(st==="PARCIAL") return <span className="tag warn">Parcial (órfã)</span>;
+    return <span className="tag warn">Órfã</span>;
+  }
   function vencStr(d){ return d? (("0"+d.getDate()).slice(-2)+"/"+("0"+(d.getMonth()+1)).slice(-2)+"/"+d.getFullYear()) : "—"; }
 
   return (
@@ -326,15 +475,17 @@ function App(){
         <div className="bar"></div>
         <div>
           <h1>Checador de Comissão Registrada</h1>
-          <p>Confronta o demonstrativo (TXT) com os títulos espécie CO do TOTVS · Rede Gazeta</p>
+          <p>Triangula demonstrativo (TXT) × TOTVS (CO) × Nota Fiscal (PDF) · Rede Gazeta</p>
         </div>
       </header>
 
-      <div className="grid2">
-        <Drop label="1. Relações de Comissões (.TXT)" hint="Um ou vários demonstrativos — pode selecionar todos de uma vez"
+      <div className="grid3">
+        <Drop label="1. Relações de Comissões (.TXT)" hint="Um ou vários demonstrativos"
           fileName={txtName} onFile={loadTxt} accept=".txt,.TXT" multiple={true} />
         <Drop label="2. Contas a Pagar TOTVS (.xlsx)" hint="Export com espécie CO e Vl Original"
           fileName={xlsName} onFile={loadXls} accept=".xlsx,.xls" />
+        <Drop label="3. Notas Fiscais (.pdf) — opcional" hint="Uma ou várias NFS-e"
+          fileName={nfName} onFile={loadNf} accept=".pdf" multiple={true} />
       </div>
 
       {err ? <div className="card" style={{borderColor:"var(--err)",color:"var(--err)"}}>{err}</div> : null}
@@ -350,6 +501,12 @@ function App(){
             <div className="card"><div className="lbl">IR retido</div><div className="val" style={{color:"var(--gold)"}}>{fmt(stats.ir)}</div></div>
             <div className="card"><div className="lbl">Líquido TXT</div><div className="val">{fmt(stats.liquido)}</div></div>
             <div className="card"><div className="lbl">Total TOTVS</div><div className="val">{fmt(stats.valTotvs)}</div></div>
+            {nfList ? [
+              <div className="card" key="cnf"><div className="lbl">Com NF OK</div><div className="val" style={{color:"var(--ok)"}}>{stats.COM_NF}</div></div>,
+              <div className="card" key="dnf"><div className="lbl">NF valor diverge</div><div className="val" style={{color:"var(--err)"}}>{stats.NF_DIVERGE}</div></div>,
+              <div className="card" key="snf"><div className="lbl">Sem NF</div><div className="val" style={{color:"var(--warn)"}}>{stats.SEM_NF}</div></div>,
+              <div className="card" key="onf"><div className="lbl">NF órfã/parcial</div><div className="val" style={{color:"var(--warn)"}}>{stats.nfOrfas}</div></div>
+            ] : null}
           </div>
 
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:12}}>
@@ -362,7 +519,7 @@ function App(){
           </div>
 
           <div className="filters">
-            {[["ALL","Todos"],["DIVERGE","Divergentes"],["OK","OK"],["SO_TXT","Só no TXT"],["SO_TOTVS","Só no TOTVS"]].map(function(f){
+            {[["ALL","Todos"],["DIVERGE","Divergentes"],["OK","OK"],["SO_TXT","Só no TXT"],["SO_TOTVS","Só no TOTVS"]].concat(nfList?[["SEM_NF","Sem NF"],["NF_DIVERGE","NF diverge"]]:[]).map(function(f){
               return <div key={f[0]} className={"chip"+(filter===f[0]?" active":"")} onClick={function(){setFilter(f[0]);}}>{f[1]}</div>;
             })}
           </div>
@@ -374,7 +531,7 @@ function App(){
                   <th>Status</th><th>Emp</th><th>Nº Comissão / Título</th><th>Comissionado</th>
                   <th>Fornec TOTVS</th><th className="num">Bruto (TXT)</th><th className="num">IR</th>
                   <th className="num">Líquido (TXT)</th><th className="num">Vl Original (TOTVS)</th>
-                  <th className="num">Diferença</th><th>Vencto</th>
+                  <th className="num">Diferença</th>{nfList?<th>NF</th>:null}<th>Vencto</th>
                 </tr>
               </thead>
               <tbody>
@@ -391,6 +548,7 @@ function App(){
                       <td className="num">{fmt(r.liquido)}</td>
                       <td className="num">{fmt(r.valorTotvs)}</td>
                       <td className="num" style={{color: (!isNaN(r.diff)&&Math.abs(r.diff)>tol)?"var(--err)":"inherit"}}>{fmt(r.diff)}</td>
+                      {nfList?<td>{r.status==="SO_TOTVS"?"—":tagNf(r.nfStatus)}{r.nfRps?(" "+r.nfRps):""}</td>:null}
                       <td>{vencStr(r.vencto)}</td>
                     </tr>
                   );
@@ -399,11 +557,47 @@ function App(){
             </table>
           </div>
           <p className="muted" style={{marginTop:10}}>
-            Chave de casamento: <b>Empresa + Número da Comissão = Título (espécie CO)</b>. O TOTVS registra o valor <b>líquido</b> (já com IR retido), então a diferença compara <b>Líquido (TXT) × Vl Original (TOTVS)</b>. A coluna IR mostra a retenção — quando ela é a única razão do descasamento, a linha fica OK.
+            Chave: <b>Empresa + Número da Comissão = Título (CO)</b>. O TOTVS registra o <b>líquido</b> (IR retido) → a coluna Diferença compara <b>Líquido (TXT) × Vl Original (TOTVS)</b>. A NF é emitida pelo <b>bruto</b> e casa por Número da Comissão (o tomador da NF é a empresa).
           </p>
+
+          {nfList && results.nfs.length ? (
+            <div style={{marginTop:26}}>
+              <h3 style={{fontSize:15,margin:"0 0 8px"}}>Notas Fiscais</h3>
+              <div className="tblwrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Situação</th><th>NF / RPS</th><th>Tomador (empresa)</th><th>Prestador</th>
+                      <th>Comissões citadas</th><th className="num">Valor NF (bruto)</th>
+                      <th className="num">Σ Bruto demonstrativos</th><th className="num">Diferença</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {results.nfs.map(function(n,i){
+                      return (
+                        <tr key={i}>
+                          <td>{tagNfRow(n.status)}</td>
+                          <td>{n.rps}</td>
+                          <td>{n.tomador||"—"}</td>
+                          <td>{n.prestador||"—"}</td>
+                          <td>{n.comissoes.join(", ")}{n.orfaos.length?(" · órfã(s): "+n.orfaos.join(", ")):""}</td>
+                          <td className="num">{fmt(n.valorNf)}</td>
+                          <td className="num">{fmt(n.somaBruto)}</td>
+                          <td className="num" style={{color:(!isNaN(n.diffNf)&&Math.abs(n.diffNf)>tol&&n.status!=="ORFA")?"var(--err)":"inherit"}}>{n.status==="ORFA"?"—":fmt(n.diffNf)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <p className="muted" style={{marginTop:8}}>
+                "Órfã" = a NF cita um Número de Comissão que não está em nenhum demonstrativo. "Parcial" = cita vários e ao menos um não foi encontrado. Uma NF pode somar vários demonstrativos: aí o valor da NF é comparado com a soma dos brutos.
+              </p>
+            </div>
+          ) : null}
         </div>
       ) : (
-        <p className="muted" style={{marginTop:24}}>Carregue os dois arquivos para rodar a checagem.</p>
+        <p className="muted" style={{marginTop:24}}>Carregue o TXT e o Excel para rodar a checagem. As Notas Fiscais (PDF) são opcionais e habilitam a terceira conferência.</p>
       )}
     </div>
   );
