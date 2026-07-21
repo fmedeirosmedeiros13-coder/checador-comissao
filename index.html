@@ -104,7 +104,12 @@ function parseTxt(text){
       codFornecedor: mForn? normInt(mForn[1]) : null,
       totalBruto: mBruto? parseBRNumber(mBruto[1]) : NaN,
       ir: mIR? parseBRNumber(mIR[1]) : NaN,
-      totalLiquido: mLiq? parseBRNumber(mLiq[1]) : NaN
+      totalLiquido: mLiq? parseBRNumber(mLiq[1]) : NaN,
+      faturas: (function(){
+        var fs = {}, rf = /\d{2}\/\d{2}\/\d{4}\s+(\d{5,8})\b/g, mf;
+        while((mf = rf.exec(chunk)) !== null){ var f = normInt(mf[1]); if(f) fs[f] = true; }
+        return Object.keys(fs);
+      })()
     });
   });
   return blocks;
@@ -175,39 +180,60 @@ function pdfToText(arrayBuffer){
   });
 }
 
-// ---- Parser da NFS-e (texto extraído) — tolerante a layouts de vários municípios ----
+// ---- Parser da NFS-e (texto extraído) — independente de layout ----
+// Não tenta adivinhar a redação: coleta candidatos liberais + guarda o texto p/ casar
+// contra os números dos relatórios (gabarito), e todos os valores em R$.
 function parseNf(text, fileName){
-  var comSet = {};
-  // Layout A (ex. Linhares): "Numero da Comissao: 003667"
-  // Layout B (ex. Vitória):  "... CONFORME COMISSÃO Nº 134253"
-  [ /N[uú]mero da Comiss[aã]o[:\s]*([0-9]{2,})/gi,
-    /COMISS[AÃ]O\s*N[º°oO.\s]*([0-9]{3,})/gi ].forEach(function(re){
-    var m; while((m = re.exec(text)) !== null){ var n = normInt(m[1]); if(n) comSet[n] = true; }
+  var textUpper = deburr(String(text||"").toUpperCase());
+  // candidatos a número de comissão (várias redações) — usados p/ detectar órfãos
+  var candSet = {};
+  [ /N[UÚ]MERO DA COMISS[AÃ]O[:\s.]*([0-9]{3,7})/gi,
+    /COMISS[AÃ]O[^0-9]{0,32}?([0-9]{3,7})/gi,
+    /([0-9]{3,7})[^0-9]{0,18}?COMISS[AÃ]O/gi,
+    /(?:SOB\s+NUMERO|N[UÚ]MERO|RELAT[OÓ]RIO|REF\.?|REFERENTE)[^0-9]{0,22}?([0-9]{3,7})/gi
+  ].forEach(function(re){
+    var m; while((m = re.exec(textUpper)) !== null){ var n = normInt(m[1]); if(n) candSet[n] = true; }
   });
-  var comissoes = Object.keys(comSet);
-  // valor do serviço (= bruto): "VALOR SERVIÇO" ou "Valor do Serviço"
+  var candidatos = Object.keys(candSet);
+  // todos os valores em R$ (BR)
+  var moneys = [];
+  var reM = /([0-9][0-9.]*,[0-9]{2})/g, mm;
+  while((mm = reM.exec(text)) !== null){ var v = parseBRNumber(mm[1]); if(!isNaN(v)) moneys.push(v); }
+  var maxMoney = moneys.length ? Math.max.apply(null, moneys) : NaN;
+  // valor do serviço (bruto): rótulo genérico; se falhar, cai no maior valor
   var mVs = text.match(/VALOR\s+(?:DO\s+)?SERVI[ÇC]O[\s\S]{0,80}?([\d.]+,\d{2})/i);
   var mVl = text.match(/VALOR\s+L[IÍ]QUIDO[\s\S]{0,80}?([\d.]+,\d{2})/i);
-  // nomes: "Razão Social:" ou "Nome / Nome Empresarial"
+  var valorServico = mVs ? parseBRNumber(mVs[1]) : maxMoney;
+  // chave de acesso NFS-e nacional (44-50 dígitos), se houver
+  var mCh = String(text||"").replace(/\s/g,"").match(/([0-9]{44,50})/);
+  // nomes (melhor esforço, só para exibição)
   var razoes = [];
   var reR = /(?:Raz[aã]o Social|Nome\s*\/\s*Nome Empresarial|Nome Empresarial)\s*:?\s*[\r\n]*\s*([^\n\r]+)/gi, mr;
   while((mr = reR.exec(text)) !== null){
-    var v = mr[1].trim();
-    if(v && /[A-Za-zÀ-ÿ]{3,}/.test(v) && !/^(CNPJ|CPF|NIF|E-?mail|Endere)/i.test(v)) razoes.push(v);
+    var vv = mr[1].trim();
+    if(vv && /[A-Za-zÀ-ÿ]{3,}/.test(vv) && !/^(CNPJ|CPF|NIF|E-?mail|Endere)/i.test(vv)) razoes.push(vv);
   }
   var mRps = text.match(/N[uú]mero da NFS-?e[\s\S]{0,40}?(\d{2,})/i)
           || text.match(/N[uú]mero RPS[\s\S]{0,40}?(\d{3,})/i)
-          || text.match(/N[º°o]\s*da Nota Fiscal[\s\S]{0,40}?(\d{2,})/i);
+          || text.match(/RPS\s+(\d{2,})/i);
   return {
     fileName: fileName,
-    comissoes: comissoes,
-    valorServico: mVs ? parseBRNumber(mVs[1]) : NaN,
+    candidatos: candidatos,
+    moneys: moneys,
+    valorServico: valorServico,
     valorLiquido: mVl ? parseBRNumber(mVl[1]) : NaN,
     prestador: razoes.length > 0 ? razoes[0] : "",
     tomador: razoes.length > 1 ? razoes[1] : "",
+    chave: mCh ? mCh[1] : "",
     rps: mRps ? mRps[1] : (fileName || "").replace(/\D/g,"").slice(0,6),
-    textUpper: deburr(String(text||"").toUpperCase())
+    textUpper: textUpper
   };
+}
+
+// procura um número de comissão dentro do texto (tolera zeros à esquerda, exige limite de dígito)
+function numInText(num, textUpper){
+  if(!num || !textUpper) return false;
+  return new RegExp("(^|[^0-9])0*" + num + "([^0-9]|$)").test(textUpper);
 }
 
 // remove acentos
@@ -234,6 +260,12 @@ function nameInText(comisNome, textUpper){
   toks.forEach(function(t){ if(textUpper.indexOf(t) >= 0) hit++; });
   return hit >= Math.min(2, toks.length); // pelo menos 2 tokens (ou todos, se tiver 1)
 }
+// versão frouxa: basta 1 token distintivo — usada só no fallback (já exige valor+empresa)
+function nameInTextLoose(comisNome, textUpper){
+  var toks = nameTokens(comisNome);
+  if(!toks.length || !textUpper) return false;
+  return toks.some(function(t){ return textUpper.indexOf(t) >= 0; });
+}
 function uniq(arr){ var s={}, o=[]; arr.forEach(function(x){ if(!s[x]){ s[x]=true; o.push(x); } }); return o; }
 
 // ---- Reconciliação: chave Empresa + Título(=Nº Comissão) ----
@@ -255,7 +287,7 @@ function reconcile(txtBlocks, totvsRows, nfList, tol){
     var base = {
       empCode: b.empCode, empNome: b.empNome,
       numeroComissao: b.numeroComissao, comisNome: b.comisNome,
-      bruto: bruto, ir: ir, liquido: liquido,
+      bruto: bruto, ir: ir, liquido: liquido, faturas: b.faturas || [],
       nfRps: "", nfStatus: "SEM_NF"
     };
     if(matches.length){
@@ -285,27 +317,37 @@ function reconcile(txtBlocks, totvsRows, nfList, tol){
     });
   });
 
-  // ---- Camada NF: agrupamento N:M por conectividade de Número da Comissão ----
-  var demByNum = {};
-  results.forEach(function(r){
-    if(r.status === "SO_TOTVS") return;
-    (demByNum[r.numeroComissao] = demByNum[r.numeroComissao] || []).push(r);
-  });
+  // ---- Camada NF: gabarito — números dos relatórios procurados no texto da NF ----
+  var validNums = {};
+  results.forEach(function(r){ if(r.status !== "SO_TOTVS") validNums[r.numeroComissao] = true; });
 
-  // resolve cada número citado da NF para um demonstrativo (tomador desempata colisão de empresa)
   var nfMeta = (nfList || []).map(function(nf, i){
-    var resolved = [], orfaos = [];
-    nf.comissoes.forEach(function(num){
-      var cand = demByNum[num] || [];
-      var pick = null;
-      if(cand.length === 1){ pick = cand[0]; }
-      else if(cand.length > 1){
-        var best = -1;
-        cand.forEach(function(c){ var ov = nameOverlap(c.empNome, nf.tomador); if(ov > best){ best = ov; pick = c; } });
-      }
-      if(pick){ resolved.push(pick); } else { orfaos.push(num); }
+    var resolved = [], vias = {};
+    function key(r){ return r.empCode + "|" + r.numeroComissao; }
+    // 1) número da comissão no texto
+    results.forEach(function(r){
+      if(r.status === "SO_TOTVS") return;
+      if(numInText(r.numeroComissao, nf.textUpper)){ resolved.push(r); vias[key(r)] = "comissão"; }
     });
-    return { nf: nf, idx: i, resolved: resolved, orfaos: orfaos };
+    // 2) número da fatura (item do relatório) no texto — para os que ainda não casaram
+    results.forEach(function(r){
+      if(r.status === "SO_TOTVS" || vias[key(r)]) return;
+      if((r.faturas || []).some(function(f){ return numInText(f, nf.textUpper); })){ resolved.push(r); vias[key(r)] = "fatura"; }
+    });
+    // 3) fallback: razão social (comissionado) + valor (bruto/líquido) + empresa (tomador)
+    //    só quando a NF não casou por número nem fatura
+    if(resolved.length === 0){
+      results.forEach(function(r){
+        if(r.status === "SO_TOTVS") return;
+        var nomeHit = nameInTextLoose(r.comisNome, nf.textUpper);
+        var empHit  = nameInText(r.empNome, nf.textUpper);
+        var valHit  = (nf.moneys || []).some(function(v){ return Math.abs(v - r.bruto) <= tol || Math.abs(v - r.liquido) <= tol; });
+        if(nomeHit && empHit && valHit){ resolved.push(r); vias[key(r)] = "razão+valor"; }
+      });
+    }
+    // órfãos: candidatos numéricos citados que não existem em relatório algum
+    var orfaos = uniq((nf.candidatos || []).map(normInt).filter(Boolean)).filter(function(c){ return !validNums[c]; });
+    return { nf: nf, idx: i, resolved: resolved, vias: vias, orfaos: orfaos };
   });
 
   // union-find sobre nós "N:idx" (NFs) e "D:empCode|num" (relatórios)
@@ -321,10 +363,11 @@ function reconcile(txtBlocks, totvsRows, nfList, tol){
   var comps = {};
   nfMeta.forEach(function(nm){
     var root = find("N:" + nm.idx);
-    if(!comps[root]) comps[root] = { nfs: [], dems: {}, orfaos: [] };
+    if(!comps[root]) comps[root] = { nfs: [], dems: {}, orfaos: [], vias: {} };
     comps[root].nfs.push(nm.nf);
     comps[root].orfaos = comps[root].orfaos.concat(nm.orfaos);
     nm.resolved.forEach(function(d){ comps[root].dems[d.empCode + "|" + d.numeroComissao] = d; });
+    Object.keys(nm.vias).forEach(function(k){ comps[root].vias[nm.vias[k]] = true; });
   });
 
   var groups = Object.keys(comps).map(function(root){
@@ -335,7 +378,7 @@ function reconcile(txtBlocks, totvsRows, nfList, tol){
     var diff = sumNf - sumBruto;
     var orfaos = uniq(c.orfaos);
     var status;
-    if(dems.length === 0){ status = "ORFA"; }
+    if(dems.length === 0){ status = (orfaos.length > 0) ? "ORFA" : "SEM_NUM"; }
     else if(orfaos.length > 0){ status = "PARCIAL"; }
     else if(Math.abs(diff) <= tol){ status = "NF_OK"; }
     else { status = "NF_DIVERGE"; }
@@ -352,7 +395,8 @@ function reconcile(txtBlocks, totvsRows, nfList, tol){
     });
     return {
       nfs: c.nfs, dems: dems, sumNf: sumNf, sumBruto: sumBruto, diff: diff,
-      orfaos: orfaos, status: status, nomeOk: nomeOk, cardinal: cardinal
+      orfaos: orfaos, status: status, nomeOk: nomeOk, cardinal: cardinal,
+      via: Object.keys(c.vias).join(", ")
     };
   });
 
@@ -515,6 +559,7 @@ function App(){
     if(st==="NF_OK") return <span className="tag ok">OK</span>;
     if(st==="NF_DIVERGE") return <span className="tag err">Valor diverge</span>;
     if(st==="PARCIAL") return <span className="tag warn">Parcial (órfã)</span>;
+    if(st==="SEM_NUM") return <span className="tag warn">Sem nº na NF</span>;
     return <span className="tag warn">Órfã</span>;
   }
   function vencStr(d){ return d? (("0"+d.getDate()).slice(-2)+"/"+("0"+(d.getMonth()+1)).slice(-2)+"/"+d.getFullYear()) : "—"; }
@@ -618,21 +663,23 @@ function App(){
                 <table>
                   <thead>
                     <tr>
-                      <th>Situação</th><th>Tipo</th><th>NF (RPS)</th><th>Relatório (comissões)</th>
+                      <th>Situação</th><th>Tipo</th><th>Casou por</th><th>NF (RPS)</th><th>Relatório (comissões)</th>
                       <th>Comissionado (relatório)</th><th>Prestador (NF)</th><th>Razão social</th>
                       <th className="num">Σ Valor NF</th><th className="num">Σ Bruto relatório</th><th className="num">Diferença</th>
                     </tr>
                   </thead>
                   <tbody>
                     {results.groups.map(function(g,i){
-                      var rps = g.nfs.map(function(n){return n.rps;}).join(", ");
+                      var rps = g.nfs.map(function(n){return n.rps || (n.fileName||"").replace(/\.pdf$/i,"");}).join(", ");
                       var coms = g.dems.map(function(d){return d.numeroComissao;}).join(", ");
                       var comNomes = uniq(g.dems.map(function(d){return d.comisNome;}).filter(Boolean)).join(" / ");
                       var prestNomes = uniq(g.nfs.map(function(n){return n.prestador;}).filter(Boolean)).join(" / ");
+                      var noVal = (g.status==="ORFA"||g.status==="SEM_NUM");
                       return (
                         <tr key={i}>
                           <td>{tagNfRow(g.status)}</td>
                           <td>{g.cardinal}</td>
+                          <td>{g.via||"—"}</td>
                           <td>{rps}{g.orfaos.length?(" · órfã(s): "+g.orfaos.join(", ")):""}</td>
                           <td>{coms||"—"}</td>
                           <td>{comNomes||"—"}</td>
@@ -640,7 +687,7 @@ function App(){
                           <td>{g.dems.length===0 ? "—" : (g.nomeOk ? <span className="tag ok">confere</span> : <span className="tag err">diverge</span>)}</td>
                           <td className="num">{fmt(g.sumNf)}</td>
                           <td className="num">{fmt(g.sumBruto)}</td>
-                          <td className="num" style={{color:(!isNaN(g.diff)&&Math.abs(g.diff)>tol&&g.status!=="ORFA")?"var(--err)":"inherit"}}>{g.status==="ORFA"?"—":fmt(g.diff)}</td>
+                          <td className="num" style={{color:(!isNaN(g.diff)&&Math.abs(g.diff)>tol&&!noVal)?"var(--err)":"inherit"}}>{noVal?"—":fmt(g.diff)}</td>
                         </tr>
                       );
                     })}
@@ -648,7 +695,7 @@ function App(){
                 </table>
               </div>
               <p className="muted" style={{marginTop:8}}>
-                <b>Tipo</b> = NFs : relatórios do grupo (1:1, 1:N, N:1, N:M). Grupos se formam por Número de Comissão compartilhado, e o valor confere pela <b>soma das NFs × soma dos brutos</b> — cobre uma NF para vários relatórios e várias NFs para um relatório. <b>Razão social</b> compara o prestador da NF com o comissionado do relatório. "Órfã" = número citado sem relatório; "Parcial" = grupo com algum número não encontrado.
+                <b>Tipo</b> = NFs : relatórios do grupo (1:1, 1:N, N:1, N:M). O casamento tenta, em ordem: (1) <b>número da comissão</b> no texto da NF, (2) <b>número da fatura</b> (item do relatório) no texto, (3) <b>razão social + valor + empresa</b> quando a NF só traz o valor. O valor confere pela soma das NFs × soma dos brutos do relatório. "Órfã" = número citado sem relatório; "Sem nº na NF" = a NF não trouxe número nem fatura reconhecível.
               </p>
             </div>
           ) : null}
