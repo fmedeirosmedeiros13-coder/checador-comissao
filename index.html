@@ -433,6 +433,7 @@ function reconcile(txtBlocks, totvsRows, nfList, tol){
       d.nfRps = c.nfs.map(function(n){ return n.rps; }).join(", ");
       d.nfStatus = (status === "NF_DIVERGE") ? "NF_DIVERGE" : "NF_OK";
       d.nfNomeOk = nomeOk;
+      d.compNome = uniq(c.nfs.map(function(n){ return n.prestador; }).filter(Boolean)).join(" / ");
     });
     return {
       nfs: c.nfs, dems: dems, sumNf: sumNf, sumBruto: sumRef, diff: diff,
@@ -604,7 +605,7 @@ function App(){
     var lines = [head.join(";")];
     results.rows.forEach(function(r){
       var v = r.vencto? (("0"+r.vencto.getDate()).slice(-2)+"/"+("0"+(r.vencto.getMonth()+1)).slice(-2)+"/"+r.vencto.getFullYear()) : "";
-      lines.push([r.status,r.empCode,'"'+r.empNome+'"',r.numeroComissao,'"'+r.comisNome+'"','"'+r.fornecTotvs+'"',
+      lines.push([r.status,r.empCode,'"'+r.empNome+'"',r.numeroComissao,'"'+(r.comisNome||r.compNome||"")+'"','"'+r.fornecTotvs+'"',
         isNaN(r.bruto)?"":fmt(r.bruto),isNaN(r.ir)?"":fmt(r.ir),isNaN(r.liquido)?"":fmt(r.liquido),
         isNaN(r.valorTotvs)?"":fmt(r.valorTotvs),isNaN(r.diff)?"":fmt(r.diff),
         '"'+(r.nfRps||"")+'"', r.nfStatus||"", v, r.nTitulos].join(";"));
@@ -759,7 +760,7 @@ function App(){
                       <td>{tagOf(r.status)}</td>
                       <td>{r.empCode}{r.empNome?(" - "+r.empNome):""}</td>
                       <td>{r.numeroComissao}{r.nTitulos>1?(" ("+r.nTitulos+" tít.)"):""}</td>
-                      <td>{r.comisNome||"—"}</td>
+                      <td>{r.comisNome || r.compNome || "—"}{(!r.comisNome && r.compNome)?<span style={{color:"var(--gray)",fontSize:11}}> (da NF/recibo)</span>:null}</td>
                       <td>{r.fornecTotvs||"—"}</td>
                       <td className="num">{fmt(r.bruto)}</td>
                       <td className="num" style={{color:(!isNaN(r.ir)&&r.ir>0)?"var(--gold)":"inherit"}}>{fmt(r.ir)}</td>
