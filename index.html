@@ -220,6 +220,7 @@ function parseNf(text, fileName){
   return {
     fileName: fileName,
     tipo: "NF",
+    pf: /\d{3}\.\d{3}\.\d{3}-\d{2}/.test(text),   // tem CPF => pessoa física
     candidatos: candidatos,
     moneys: moneys,
     valorServico: valorServico,
@@ -253,6 +254,7 @@ function parseRecibo(text, fileName){
   return {
     fileName: fileName,
     tipo: "Recibo",
+    pf: true,
     candidatos: Object.keys(candSet),
     faturasCitadas: Object.keys(faturas),
     moneys: moneys,
@@ -354,40 +356,40 @@ function reconcile(txtBlocks, totvsRows, nfList, tol){
     });
   });
 
-  // ---- Camada NF: gabarito — números dos relatórios procurados no texto da NF ----
+  // ---- Camada Comprovante (NF/Recibo): gabarito contra TODOS os títulos ----
+  // inclui os "Só no TOTVS" (ex.: pessoa física sem demonstrativo TXT) para o comprovante encostar.
   var validNums = {};
-  results.forEach(function(r){ if(r.status !== "SO_TOTVS") validNums[r.numeroComissao] = true; });
+  results.forEach(function(r){ validNums[r.numeroComissao] = true; });
 
   var nfMeta = (nfList || []).map(function(nf, i){
     var resolved = [], vias = {};
     function key(r){ return r.empCode + "|" + r.numeroComissao; }
-    // 1) número da comissão no texto
+    // 1) número da comissão/título no texto
     results.forEach(function(r){
-      if(r.status === "SO_TOTVS") return;
       if(numInText(r.numeroComissao, nf.textUpper)){ resolved.push(r); vias[key(r)] = "comissão"; }
     });
     // 2) número da fatura (item do relatório) no texto — para os que ainda não casaram
     results.forEach(function(r){
-      if(r.status === "SO_TOTVS" || vias[key(r)]) return;
+      if(vias[key(r)]) return;
       if((r.faturas || []).some(function(f){ return numInText(f, nf.textUpper); })){ resolved.push(r); vias[key(r)] = "fatura"; }
     });
-    // 3) fallback: razão social (comissionado) + valor (bruto/líquido) + empresa (tomador)
-    //    só quando a NF não casou por número nem fatura
+    // 3) fallback: razão social + valor (bruto/líquido/TOTVS) + empresa — só se nada casou
     if(resolved.length === 0){
       results.forEach(function(r){
-        if(r.status === "SO_TOTVS") return;
         var nomeHit = nameInTextLoose(r.comisNome, nf.textUpper);
         var empHit  = nameInText(r.empNome, nf.textUpper);
-        var valHit  = (nf.moneys || []).some(function(v){ return Math.abs(v - r.bruto) <= tol || Math.abs(v - r.liquido) <= tol; });
+        var refs = [r.bruto, r.liquido, r.valorTotvs];
+        var valHit = (nf.moneys || []).some(function(v){ return refs.some(function(x){ return !isNaN(x) && Math.abs(v - x) <= tol; }); });
         if(nomeHit && empHit && valHit){ resolved.push(r); vias[key(r)] = "razão+valor"; }
       });
     }
-    // órfãos: candidatos numéricos citados que não existem em relatório algum
-    var orfaos = uniq((nf.candidatos || []).map(normInt).filter(Boolean)).filter(function(c){ return !validNums[c]; });
+    // órfã: só quando o comprovante não casou com NADA (evita ruído de candidatos)
+    var orfaos = (resolved.length === 0)
+      ? uniq((nf.candidatos || []).map(normInt).filter(Boolean)).filter(function(c){ return !validNums[c]; })
+      : [];
     return { nf: nf, idx: i, resolved: resolved, vias: vias, orfaos: orfaos };
   });
 
-  // union-find sobre nós "N:idx" (NFs) e "D:empCode|num" (relatórios)
   var parent = {};
   function find(x){ if(parent[x] === undefined) parent[x] = x; if(parent[x] !== x) parent[x] = find(parent[x]); return parent[x]; }
   function union(a,b){ parent[find(a)] = find(b); }
@@ -396,7 +398,6 @@ function reconcile(txtBlocks, totvsRows, nfList, tol){
     nm.resolved.forEach(function(d){ union(nkey, "D:" + d.empCode + "|" + d.numeroComissao); });
   });
 
-  // agrupa por raiz (só grupos que contêm ao menos uma NF)
   var comps = {};
   nfMeta.forEach(function(nm){
     var root = find("N:" + nm.idx);
@@ -410,29 +411,32 @@ function reconcile(txtBlocks, totvsRows, nfList, tol){
   var groups = Object.keys(comps).map(function(root){
     var c = comps[root];
     var dems = Object.keys(c.dems).map(function(k){ return c.dems[k]; });
-    var sumNf = c.nfs.reduce(function(a,n){ var v = !isNaN(n.valorServico)?n.valorServico:n.valorLiquido; return a + (isNaN(v)?0:v); }, 0);
-    var sumBruto = dems.reduce(function(a,d){ return a + (isNaN(d.bruto)?0:d.bruto); }, 0);
-    var diff = sumNf - sumBruto;
+    // base de comparação: se há bruto no relatório, compara bruto; senão (só TOTVS) compara líquido
+    var temBruto = dems.some(function(d){ return !isNaN(d.bruto); });
+    var sumRef = dems.reduce(function(a,d){ return a + (temBruto ? (isNaN(d.bruto)?(isNaN(d.valorTotvs)?0:d.valorTotvs):d.bruto) : (isNaN(d.valorTotvs)?0:d.valorTotvs)); }, 0);
+    var sumNf = c.nfs.reduce(function(a,n){
+      var v = temBruto ? (!isNaN(n.valorServico)?n.valorServico:n.valorLiquido) : (!isNaN(n.valorLiquido)?n.valorLiquido:n.valorServico);
+      return a + (isNaN(v)?0:v);
+    }, 0);
+    var diff = sumNf - sumRef;
     var orfaos = uniq(c.orfaos);
     var status;
     if(dems.length === 0){ status = (orfaos.length > 0) ? "ORFA" : "SEM_NUM"; }
-    else if(orfaos.length > 0){ status = "PARCIAL"; }
     else if(Math.abs(diff) <= tol){ status = "NF_OK"; }
     else { status = "NF_DIVERGE"; }
-    // validador de razão social: comissionado(relatório) aparece no texto de alguma NF do grupo
     var nomeOk = (dems.length > 0) && dems.every(function(d){
       return c.nfs.some(function(n){ return nameInText(d.comisNome, n.textUpper); });
     });
-    var cardinal = c.nfs.length + ":" + dems.length; // NFs : relatórios
-    // anota nos demonstrativos do grupo
+    var pf = c.nfs.some(function(n){ return n.pf; });
+    var cardinal = c.nfs.length + ":" + dems.length;
     dems.forEach(function(d){
       d.nfRps = c.nfs.map(function(n){ return n.rps; }).join(", ");
       d.nfStatus = (status === "NF_DIVERGE") ? "NF_DIVERGE" : "NF_OK";
       d.nfNomeOk = nomeOk;
     });
     return {
-      nfs: c.nfs, dems: dems, sumNf: sumNf, sumBruto: sumBruto, diff: diff,
-      orfaos: orfaos, status: status, nomeOk: nomeOk, cardinal: cardinal,
+      nfs: c.nfs, dems: dems, sumNf: sumNf, sumBruto: sumRef, diff: diff,
+      orfaos: orfaos, status: status, nomeOk: nomeOk, cardinal: cardinal, pf: pf,
       via: Object.keys(c.vias).join(", ")
     };
   });
@@ -571,14 +575,18 @@ function App(){
       if(!isNaN(r.ir)) s.ir+=r.ir;
       if(!isNaN(r.liquido)) s.liquido+=r.liquido;
       if(!isNaN(r.valorTotvs)) s.valTotvs+=r.valorTotvs;
-      if(r.status!=="SO_TOTVS"){
-        if(r.nfStatus==="SEM_NF") s.SEM_NF++;
-        else if(r.nfStatus==="NF_DIVERGE") s.NF_DIVERGE++;
-        else if(r.nfStatus==="NF_OK") s.COM_NF++;
-      }
+      if(r.nfStatus==="NF_DIVERGE") s.NF_DIVERGE++;
+      else if(r.nfStatus==="NF_OK") s.COM_NF++;
+      else if(r.status!=="SO_TOTVS") s.SEM_NF++; // sem comprovante só conta para quem tem demonstrativo
     });
-    s.nfOrfas = results.groups.filter(function(g){return g.status==="ORFA"||g.status==="PARCIAL";}).length;
+    s.nfOrfas = results.groups.filter(function(g){return g.status==="ORFA"||g.status==="SEM_NUM";}).length;
     s.nomeDiverge = results.groups.filter(function(g){return g.dems.length>0 && !g.nomeOk;}).length;
+    // pessoa física × jurídica (por comprovante casado)
+    s.pfOk=0; s.pjOk=0;
+    results.groups.forEach(function(g){
+      if(g.dems.length===0) return;
+      if(g.pf) s.pfOk += g.nfs.length; else s.pjOk += g.nfs.length;
+    });
     return s;
   },[results]);
 
@@ -615,6 +623,7 @@ function App(){
   function tagNf(st){
     if(st==="NF_OK") return <span className="tag ok">comprov. ok</span>;
     if(st==="NF_DIVERGE") return <span className="tag err">valor diverge</span>;
+    if(st==="SO_TOTVS") return "—";
     return <span className="tag warn">sem comprov.</span>;
   }
   function tagNfRow(st){
@@ -626,6 +635,52 @@ function App(){
   }
   function vencStr(d){ return d? (("0"+d.getDate()).slice(-2)+"/"+("0"+(d.getMonth()+1)).slice(-2)+"/"+d.getFullYear()) : "—"; }
   var hasComp = !!(nfList || recList);
+
+  function confTable(list, titulo, cor){
+    if(!list.length) return null;
+    return (
+      <div style={{marginTop:22}}>
+        <h3 style={{fontSize:15,margin:"0 0 8px",color:cor}}>{titulo} <span style={{color:"var(--gray)",fontWeight:400,fontSize:13}}>({list.length})</span></h3>
+        <div className="tblwrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Situação</th><th>Tipo</th><th>Comprov.</th><th>Casou por</th><th>Nº / arquivo</th><th>Relatório (comissões)</th>
+                <th>Comissionado (relatório)</th><th>Prestador</th><th>Razão social</th>
+                <th className="num">Σ Valor</th><th className="num">Σ Ref. relatório</th><th className="num">Diferença</th>
+              </tr>
+            </thead>
+            <tbody>
+              {list.map(function(g,i){
+                var rps = g.nfs.map(function(n){return n.rps || (n.fileName||"").replace(/\.(pdf|txt)$/i,"");}).join(", ");
+                var tipos = uniq(g.nfs.map(function(n){return n.tipo||"NF";})).join(", ");
+                var coms = g.dems.map(function(d){return d.numeroComissao;}).join(", ");
+                var comNomes = uniq(g.dems.map(function(d){return d.comisNome;}).filter(Boolean)).join(" / ");
+                var prestNomes = uniq(g.nfs.map(function(n){return n.prestador;}).filter(Boolean)).join(" / ");
+                var noVal = (g.status==="ORFA"||g.status==="SEM_NUM");
+                return (
+                  <tr key={i}>
+                    <td>{tagNfRow(g.status)}</td>
+                    <td>{g.cardinal}</td>
+                    <td>{tipos}</td>
+                    <td>{g.via||"—"}</td>
+                    <td>{rps}{g.orfaos.length?(" · órfã(s): "+g.orfaos.join(", ")):""}</td>
+                    <td>{coms||"—"}</td>
+                    <td>{comNomes||"—"}</td>
+                    <td>{prestNomes||"—"}</td>
+                    <td>{g.dems.length===0 ? "—" : (g.nomeOk ? <span className="tag ok">confere</span> : <span className="tag err">diverge</span>)}</td>
+                    <td className="num">{fmt(g.sumNf)}</td>
+                    <td className="num">{fmt(g.sumBruto)}</td>
+                    <td className="num" style={{color:(!isNaN(g.diff)&&Math.abs(g.diff)>tol&&!noVal)?"var(--err)":"inherit"}}>{noVal?"—":fmt(g.diff)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="wrap">
@@ -665,8 +720,10 @@ function App(){
               <div className="card" key="cnf"><div className="lbl">Com comprovante OK</div><div className="val" style={{color:"var(--ok)"}}>{stats.COM_NF}</div></div>,
               <div className="card" key="dnf"><div className="lbl">Valor diverge</div><div className="val" style={{color:"var(--err)"}}>{stats.NF_DIVERGE}</div></div>,
               <div className="card" key="snf"><div className="lbl">Sem comprovante</div><div className="val" style={{color:"var(--warn)"}}>{stats.SEM_NF}</div></div>,
-              <div className="card" key="onf"><div className="lbl">Órfã/parcial</div><div className="val" style={{color:"var(--warn)"}}>{stats.nfOrfas}</div></div>,
-              <div className="card" key="rnf"><div className="lbl">Razão social diverge</div><div className="val" style={{color:"var(--err)"}}>{stats.nomeDiverge}</div></div>
+              <div className="card" key="onf"><div className="lbl">Órfã/sem nº</div><div className="val" style={{color:"var(--warn)"}}>{stats.nfOrfas}</div></div>,
+              <div className="card" key="rnf"><div className="lbl">Razão social diverge</div><div className="val" style={{color:"var(--err)"}}>{stats.nomeDiverge}</div></div>,
+              <div className="card" key="pf"><div className="lbl">Pessoa física (recibo/CPF)</div><div className="val" style={{color:"var(--teal)"}}>{stats.pfOk}</div></div>,
+              <div className="card" key="pj"><div className="lbl">Pessoa jurídica (NF)</div><div className="val" style={{color:"var(--navy2)"}}>{stats.pjOk}</div></div>
             ] : null}
           </div>
 
@@ -709,7 +766,7 @@ function App(){
                       <td className="num">{fmt(r.liquido)}</td>
                       <td className="num">{fmt(r.valorTotvs)}</td>
                       <td className="num" style={{color: (!isNaN(r.diff)&&Math.abs(r.diff)>tol)?"var(--err)":"inherit"}}>{fmt(r.diff)}</td>
-                      {hasComp?<td>{r.status==="SO_TOTVS"?"—":tagNf(r.nfStatus)}{r.nfRps?(" "+r.nfRps):""}</td>:null}
+                      {hasComp?<td>{tagNf(r.nfStatus)}{r.nfRps?(" "+r.nfRps):""}</td>:null}
                       <td>{vencStr(r.vencto)}</td>
                     </tr>
                   );
@@ -722,47 +779,12 @@ function App(){
           </p>
 
           {hasComp && results.groups.length ? (
-            <div style={{marginTop:26}}>
-              <h3 style={{fontSize:15,margin:"0 0 8px"}}>Conferência Relatório × Comprovante (NF / Recibo)</h3>
-              <div className="tblwrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Situação</th><th>Tipo</th><th>Comprov.</th><th>Casou por</th><th>Nº / arquivo</th><th>Relatório (comissões)</th>
-                      <th>Comissionado (relatório)</th><th>Prestador</th><th>Razão social</th>
-                      <th className="num">Σ Valor</th><th className="num">Σ Bruto relatório</th><th className="num">Diferença</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {results.groups.map(function(g,i){
-                      var rps = g.nfs.map(function(n){return n.rps || (n.fileName||"").replace(/\.(pdf|txt)$/i,"");}).join(", ");
-                      var tipos = uniq(g.nfs.map(function(n){return n.tipo||"NF";})).join(", ");
-                      var coms = g.dems.map(function(d){return d.numeroComissao;}).join(", ");
-                      var comNomes = uniq(g.dems.map(function(d){return d.comisNome;}).filter(Boolean)).join(" / ");
-                      var prestNomes = uniq(g.nfs.map(function(n){return n.prestador;}).filter(Boolean)).join(" / ");
-                      var noVal = (g.status==="ORFA"||g.status==="SEM_NUM");
-                      return (
-                        <tr key={i}>
-                          <td>{tagNfRow(g.status)}</td>
-                          <td>{g.cardinal}</td>
-                          <td>{tipos}</td>
-                          <td>{g.via||"—"}</td>
-                          <td>{rps}{g.orfaos.length?(" · órfã(s): "+g.orfaos.join(", ")):""}</td>
-                          <td>{coms||"—"}</td>
-                          <td>{comNomes||"—"}</td>
-                          <td>{prestNomes||"—"}</td>
-                          <td>{g.dems.length===0 ? "—" : (g.nomeOk ? <span className="tag ok">confere</span> : <span className="tag err">diverge</span>)}</td>
-                          <td className="num">{fmt(g.sumNf)}</td>
-                          <td className="num">{fmt(g.sumBruto)}</td>
-                          <td className="num" style={{color:(!isNaN(g.diff)&&Math.abs(g.diff)>tol&&!noVal)?"var(--err)":"inherit"}}>{noVal?"—":fmt(g.diff)}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-              <p className="muted" style={{marginTop:8}}>
-                <b>Tipo</b> = comprovantes : relatórios do grupo (1:1, 1:N, N:1, N:M). <b>Comprov.</b> = NF (empresa) ou Recibo (pessoa física, retém INSS). O casamento tenta, em ordem: (1) <b>número da comissão</b> no texto, (2) <b>número da fatura</b> (item do relatório), (3) <b>razão social + valor + empresa</b> quando só há valor. O valor confere pela soma dos comprovantes × soma dos brutos. "Órfã" = número citado sem relatório; "Sem nº" = comprovante sem número nem fatura reconhecível.
+            <div style={{marginTop:20}}>
+              <h3 style={{fontSize:16,margin:"0 0 2px",color:"var(--navy)"}}>Conferência Relatório × Comprovante</h3>
+              {confTable(results.groups.filter(function(g){return !g.pf;}), "Pessoa jurídica — Nota Fiscal", "var(--navy2)")}
+              {confTable(results.groups.filter(function(g){return g.pf;}), "Pessoa física — Recibo / CPF", "var(--teal)")}
+              <p className="muted" style={{marginTop:10}}>
+                <b>Tipo</b> = comprovantes : relatórios do grupo (1:1, 1:N, N:1, N:M). PJ emite NF (retém IR); PF emite recibo (retém INSS) — a conciliação compara pelo <b>bruto</b> quando há demonstrativo e pelo <b>líquido</b> quando a comissão só existe no TOTVS. Casamento por número da comissão, número da fatura ou razão social + valor + empresa. "Órfã/sem nº" = comprovante que não casou com nenhuma comissão carregada.
               </p>
             </div>
           ) : null}
