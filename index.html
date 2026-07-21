@@ -489,9 +489,9 @@ function App(){
       });
     };
     Promise.all(files.map(readOne)).then(function(list){
-      var comTotal = list.reduce(function(a,n){return a + n.comissoes.length;},0);
+      var comTotal = list.reduce(function(a,n){return a + (n.candidatos ? n.candidatos.length : 0);},0);
       setNfList(list);
-      setNfName(files.length + " NF(s) · " + comTotal + " nº de comissão citado(s)");
+      setNfName(files.length + " NF(s) · " + comTotal + " nº citado(s) detectado(s)");
     }).catch(function(e){ setErr("Erro na NF (PDF): "+(e && e.message ? e.message : e)); });
   },[]);
 
