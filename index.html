@@ -214,6 +214,7 @@ function nameOverlap(a,b){
   tb.forEach(function(t){if(set[t]) hit++;});
   return hit;
 }
+function uniq(arr){ var s={}, o=[]; arr.forEach(function(x){ if(!s[x]){ s[x]=true; o.push(x); } }); return o; }
 
 // ---- Reconciliação: chave Empresa + Título(=Nº Comissão) ----
 function reconcile(txtBlocks, totvsRows, nfList, tol){
@@ -264,50 +265,78 @@ function reconcile(txtBlocks, totvsRows, nfList, tol){
     });
   });
 
-  // ---- Camada NF: casa por Número da Comissão (tomador desempata colisão de empresa) ----
+  // ---- Camada NF: agrupamento N:M por conectividade de Número da Comissão ----
   var demByNum = {};
   results.forEach(function(r){
     if(r.status === "SO_TOTVS") return;
     (demByNum[r.numeroComissao] = demByNum[r.numeroComissao] || []).push(r);
   });
-  var nfs = [];
-  (nfList || []).forEach(function(nf){
-    var cited = [];   // demonstrativos casados
-    var orfaos = [];  // números citados sem demonstrativo
+
+  // resolve cada número citado da NF para um demonstrativo (tomador desempata colisão de empresa)
+  var nfMeta = (nfList || []).map(function(nf, i){
+    var resolved = [], orfaos = [];
     nf.comissoes.forEach(function(num){
       var cand = demByNum[num] || [];
       var pick = null;
       if(cand.length === 1){ pick = cand[0]; }
       else if(cand.length > 1){
-        // colisão entre empresas: escolhe a empresa cujo nome mais casa com o tomador
         var best = -1;
         cand.forEach(function(c){ var ov = nameOverlap(c.empNome, nf.tomador); if(ov > best){ best = ov; pick = c; } });
       }
-      if(pick){ cited.push(pick); }
-      else { orfaos.push(num); }
+      if(pick){ resolved.push(pick); } else { orfaos.push(num); }
     });
-    var somaBruto = cited.reduce(function(a,c){return a + (isNaN(c.bruto)?0:c.bruto);},0);
-    var valorNf = !isNaN(nf.valorServico) ? nf.valorServico : nf.valorLiquido;
-    var diffNf = valorNf - somaBruto;
-    var status;
-    if(cited.length === 0){ status = "ORFA"; }
-    else if(orfaos.length > 0){ status = "PARCIAL"; }
-    else if(Math.abs(diffNf) <= tol){ status = "NF_OK"; }
-    else { status = "NF_DIVERGE"; }
-    // anota nos demonstrativos cobertos
-    cited.forEach(function(c){
-      c.nfRps = c.nfRps ? (c.nfRps + ", " + nf.rps) : nf.rps;
-      c.nfStatus = (status === "NF_OK") ? "NF_OK" : (status === "NF_DIVERGE" ? "NF_DIVERGE" : c.nfStatus);
-      if(c.nfStatus === "SEM_NF") c.nfStatus = "NF_OK"; // coberta, sem divergência específica
-    });
-    nfs.push({
-      rps: nf.rps, fileName: nf.fileName, tomador: nf.tomador, prestador: nf.prestador,
-      comissoes: nf.comissoes, orfaos: orfaos, valorNf: valorNf, somaBruto: somaBruto,
-      diffNf: diffNf, status: status
-    });
+    return { nf: nf, idx: i, resolved: resolved, orfaos: orfaos };
   });
 
-  return { rows: results, nfs: nfs };
+  // union-find sobre nós "N:idx" (NFs) e "D:empCode|num" (relatórios)
+  var parent = {};
+  function find(x){ if(parent[x] === undefined) parent[x] = x; if(parent[x] !== x) parent[x] = find(parent[x]); return parent[x]; }
+  function union(a,b){ parent[find(a)] = find(b); }
+  nfMeta.forEach(function(nm){
+    var nkey = "N:" + nm.idx; find(nkey);
+    nm.resolved.forEach(function(d){ union(nkey, "D:" + d.empCode + "|" + d.numeroComissao); });
+  });
+
+  // agrupa por raiz (só grupos que contêm ao menos uma NF)
+  var comps = {};
+  nfMeta.forEach(function(nm){
+    var root = find("N:" + nm.idx);
+    if(!comps[root]) comps[root] = { nfs: [], dems: {}, orfaos: [] };
+    comps[root].nfs.push(nm.nf);
+    comps[root].orfaos = comps[root].orfaos.concat(nm.orfaos);
+    nm.resolved.forEach(function(d){ comps[root].dems[d.empCode + "|" + d.numeroComissao] = d; });
+  });
+
+  var groups = Object.keys(comps).map(function(root){
+    var c = comps[root];
+    var dems = Object.keys(c.dems).map(function(k){ return c.dems[k]; });
+    var sumNf = c.nfs.reduce(function(a,n){ var v = !isNaN(n.valorServico)?n.valorServico:n.valorLiquido; return a + (isNaN(v)?0:v); }, 0);
+    var sumBruto = dems.reduce(function(a,d){ return a + (isNaN(d.bruto)?0:d.bruto); }, 0);
+    var diff = sumNf - sumBruto;
+    var orfaos = uniq(c.orfaos);
+    var status;
+    if(dems.length === 0){ status = "ORFA"; }
+    else if(orfaos.length > 0){ status = "PARCIAL"; }
+    else if(Math.abs(diff) <= tol){ status = "NF_OK"; }
+    else { status = "NF_DIVERGE"; }
+    // validador de razão social: prestador(NF) x comissionado(relatório)
+    var prest = c.nfs.map(function(n){ return n.prestador; }).filter(Boolean);
+    var coms = dems.map(function(d){ return d.comisNome; }).filter(Boolean);
+    var nomeOk = (dems.length > 0) && prest.every(function(p){ return coms.some(function(cn){ return nameOverlap(p, cn) > 0; }); });
+    var cardinal = c.nfs.length + ":" + dems.length; // NFs : relatórios
+    // anota nos demonstrativos do grupo
+    dems.forEach(function(d){
+      d.nfRps = c.nfs.map(function(n){ return n.rps; }).join(", ");
+      d.nfStatus = (status === "NF_DIVERGE") ? "NF_DIVERGE" : "NF_OK";
+      d.nfNomeOk = nomeOk;
+    });
+    return {
+      nfs: c.nfs, dems: dems, sumNf: sumNf, sumBruto: sumBruto, diff: diff,
+      orfaos: orfaos, status: status, nomeOk: nomeOk, cardinal: cardinal
+    };
+  });
+
+  return { rows: results, groups: groups };
 }
 
 function Drop({label, hint, fileName, onFile, accept, multiple}){
@@ -422,7 +451,8 @@ function App(){
         else if(r.nfStatus==="NF_OK") s.COM_NF++;
       }
     });
-    s.nfOrfas = results.nfs.filter(function(n){return n.status==="ORFA"||n.status==="PARCIAL";}).length;
+    s.nfOrfas = results.groups.filter(function(g){return g.status==="ORFA"||g.status==="PARCIAL";}).length;
+    s.nomeDiverge = results.groups.filter(function(g){return g.dems.length>0 && !g.nomeOk;}).length;
     return s;
   },[results]);
 
@@ -505,7 +535,8 @@ function App(){
               <div className="card" key="cnf"><div className="lbl">Com NF OK</div><div className="val" style={{color:"var(--ok)"}}>{stats.COM_NF}</div></div>,
               <div className="card" key="dnf"><div className="lbl">NF valor diverge</div><div className="val" style={{color:"var(--err)"}}>{stats.NF_DIVERGE}</div></div>,
               <div className="card" key="snf"><div className="lbl">Sem NF</div><div className="val" style={{color:"var(--warn)"}}>{stats.SEM_NF}</div></div>,
-              <div className="card" key="onf"><div className="lbl">NF órfã/parcial</div><div className="val" style={{color:"var(--warn)"}}>{stats.nfOrfas}</div></div>
+              <div className="card" key="onf"><div className="lbl">NF órfã/parcial</div><div className="val" style={{color:"var(--warn)"}}>{stats.nfOrfas}</div></div>,
+              <div className="card" key="rnf"><div className="lbl">Razão social diverge</div><div className="val" style={{color:"var(--err)"}}>{stats.nomeDiverge}</div></div>
             ] : null}
           </div>
 
@@ -560,30 +591,36 @@ function App(){
             Chave: <b>Empresa + Número da Comissão = Título (CO)</b>. O TOTVS registra o <b>líquido</b> (IR retido) → a coluna Diferença compara <b>Líquido (TXT) × Vl Original (TOTVS)</b>. A NF é emitida pelo <b>bruto</b> e casa por Número da Comissão (o tomador da NF é a empresa).
           </p>
 
-          {nfList && results.nfs.length ? (
+          {nfList && results.groups.length ? (
             <div style={{marginTop:26}}>
-              <h3 style={{fontSize:15,margin:"0 0 8px"}}>Notas Fiscais</h3>
+              <h3 style={{fontSize:15,margin:"0 0 8px"}}>Conferência Relatório × NF</h3>
               <div className="tblwrap">
                 <table>
                   <thead>
                     <tr>
-                      <th>Situação</th><th>NF / RPS</th><th>Tomador (empresa)</th><th>Prestador</th>
-                      <th>Comissões citadas</th><th className="num">Valor NF (bruto)</th>
-                      <th className="num">Σ Bruto demonstrativos</th><th className="num">Diferença</th>
+                      <th>Situação</th><th>Tipo</th><th>NF (RPS)</th><th>Relatório (comissões)</th>
+                      <th>Comissionado (relatório)</th><th>Prestador (NF)</th><th>Razão social</th>
+                      <th className="num">Σ Valor NF</th><th className="num">Σ Bruto relatório</th><th className="num">Diferença</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {results.nfs.map(function(n,i){
+                    {results.groups.map(function(g,i){
+                      var rps = g.nfs.map(function(n){return n.rps;}).join(", ");
+                      var coms = g.dems.map(function(d){return d.numeroComissao;}).join(", ");
+                      var comNomes = uniq(g.dems.map(function(d){return d.comisNome;}).filter(Boolean)).join(" / ");
+                      var prestNomes = uniq(g.nfs.map(function(n){return n.prestador;}).filter(Boolean)).join(" / ");
                       return (
                         <tr key={i}>
-                          <td>{tagNfRow(n.status)}</td>
-                          <td>{n.rps}</td>
-                          <td>{n.tomador||"—"}</td>
-                          <td>{n.prestador||"—"}</td>
-                          <td>{n.comissoes.join(", ")}{n.orfaos.length?(" · órfã(s): "+n.orfaos.join(", ")):""}</td>
-                          <td className="num">{fmt(n.valorNf)}</td>
-                          <td className="num">{fmt(n.somaBruto)}</td>
-                          <td className="num" style={{color:(!isNaN(n.diffNf)&&Math.abs(n.diffNf)>tol&&n.status!=="ORFA")?"var(--err)":"inherit"}}>{n.status==="ORFA"?"—":fmt(n.diffNf)}</td>
+                          <td>{tagNfRow(g.status)}</td>
+                          <td>{g.cardinal}</td>
+                          <td>{rps}{g.orfaos.length?(" · órfã(s): "+g.orfaos.join(", ")):""}</td>
+                          <td>{coms||"—"}</td>
+                          <td>{comNomes||"—"}</td>
+                          <td>{prestNomes||"—"}</td>
+                          <td>{g.dems.length===0 ? "—" : (g.nomeOk ? <span className="tag ok">confere</span> : <span className="tag err">diverge</span>)}</td>
+                          <td className="num">{fmt(g.sumNf)}</td>
+                          <td className="num">{fmt(g.sumBruto)}</td>
+                          <td className="num" style={{color:(!isNaN(g.diff)&&Math.abs(g.diff)>tol&&g.status!=="ORFA")?"var(--err)":"inherit"}}>{g.status==="ORFA"?"—":fmt(g.diff)}</td>
                         </tr>
                       );
                     })}
@@ -591,7 +628,7 @@ function App(){
                 </table>
               </div>
               <p className="muted" style={{marginTop:8}}>
-                "Órfã" = a NF cita um Número de Comissão que não está em nenhum demonstrativo. "Parcial" = cita vários e ao menos um não foi encontrado. Uma NF pode somar vários demonstrativos: aí o valor da NF é comparado com a soma dos brutos.
+                <b>Tipo</b> = NFs : relatórios do grupo (1:1, 1:N, N:1, N:M). Grupos se formam por Número de Comissão compartilhado, e o valor confere pela <b>soma das NFs × soma dos brutos</b> — cobre uma NF para vários relatórios e várias NFs para um relatório. <b>Razão social</b> compara o prestador da NF com o comissionado do relatório. "Órfã" = número citado sem relatório; "Parcial" = grupo com algum número não encontrado.
               </p>
             </div>
           ) : null}
