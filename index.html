@@ -13,7 +13,7 @@
   :root{
     --navy:#0d2340; --navy2:#16345c; --gold:#c9a227; --teal:#0f6e56;
     --ok:#0f6e56; --okbg:#e1f5ee; --warn:#854f0b; --warnbg:#faeeda;
-    --err:#a32d2d; --errbg:#fcebeb; --gray:#5f5e5a; --line:#e2e2dd; --bg:#f5f4ef;
+    --err:#a32d2d; --errbg:#fcebeb; --gray:#5f5e5a; --line:#e2e2dd; --bg:#f5f4ef; --ink:#1a1a18;
   }
   *{box-sizing:border-box}
   body{margin:0;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#1a1a18;background:var(--bg)}
@@ -27,6 +27,9 @@
   .drop h3{margin:0 0 4px;font-size:14px}
   .drop small{color:var(--gray)}
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:16px 0}
+  .seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .seg button{border:0;background:#fff;color:var(--navy);padding:6px 14px;font-size:13px;font-weight:600;cursor:pointer}
+  .seg button.on{background:var(--navy);color:#fff}
   .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;margin:16px 0}
   .grid4{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px;margin:16px 0}
   .btn{display:inline-block;background:var(--navy);color:#fff;border:none;border-radius:8px;padding:9px 16px;font-size:14px;cursor:pointer}
@@ -207,11 +210,14 @@ function parseNf(text, fileName){
   var valorServico = mVs ? parseBRNumber(mVs[1]) : maxMoney;
   // chave de acesso NFS-e nacional (44-50 dígitos), se houver
   var mCh = String(text||"").replace(/\s/g,"").match(/([0-9]{44,50})/);
-  // nomes (melhor esforço, só para exibição)
+  // nomes (melhor esforço, só para exibição) — corta em delimitadores e limita tamanho
   var razoes = [];
-  var reR = /(?:Raz[aã]o Social|Nome\s*\/\s*Nome Empresarial|Nome Empresarial)\s*:?\s*[\r\n]*\s*([^\n\r]+)/gi, mr;
+  var reR = /(?:Raz[aã]o Social|Nome\s*\/\s*Nome Empresarial|Nome Empresarial)\s*:?\s*([^\n\r]{2,120})/gi, mr;
   while((mr = reR.exec(text)) !== null){
     var vv = mr[1].trim();
+    // corta na primeira etiqueta seguinte (Endereço, CNPJ, Fone, Município, etc.)
+    vv = vv.split(/\s+(?:Endere[çc]|C[óo]digo|CNPJ|CPF|NIF|E-?mail|Fone|Celular|Site|Munic[ií]|Inscri[çc]|Nome Fantasia|CEP|Data|Serie|S[eé]rie|Regime|Optante|Simples|N[ºo°]\s)/i)[0].trim();
+    vv = vv.replace(/\s{2,}/g," ").slice(0,60).trim();
     if(vv && /[A-Za-zÀ-ÿ]{3,}/.test(vv) && !/^(CNPJ|CPF|NIF|E-?mail|Endere)/i.test(vv)) razoes.push(vv);
   }
   var mRps = text.match(/N[uú]mero da NFS-?e[\s\S]{0,40}?(\d{2,})/i)
@@ -429,6 +435,12 @@ function reconcile(txtBlocks, totvsRows, nfList, tol){
     });
     var pf = c.nfs.some(function(n){ return n.pf; });
     var cardinal = c.nfs.length + ":" + dems.length;
+    var sumTotvs = dems.reduce(function(a,d){ return a + (isNaN(d.valorTotvs)?0:d.valorTotvs); }, 0);
+    var sumTxt   = dems.reduce(function(a,d){ return a + (isNaN(d.liquido)?0:d.liquido); }, 0);
+    // nome/razão social para exibição resumida (do relatório, senão do comprovante)
+    var nomeExib = uniq(dems.map(function(d){ return d.comisNome; }).filter(Boolean)).join(" / ")
+                || uniq(c.nfs.map(function(n){ return n.prestador; }).filter(Boolean)).join(" / ")
+                || "(sem nome)";
     dems.forEach(function(d){
       d.nfRps = c.nfs.map(function(n){ return n.rps; }).join(", ");
       d.nfStatus = (status === "NF_DIVERGE") ? "NF_DIVERGE" : "NF_OK";
@@ -438,6 +450,7 @@ function reconcile(txtBlocks, totvsRows, nfList, tol){
     return {
       nfs: c.nfs, dems: dems, sumNf: sumNf, sumBruto: sumRef, diff: diff,
       orfaos: orfaos, status: status, nomeOk: nomeOk, cardinal: cardinal, pf: pf,
+      sumTotvs: sumTotvs, sumTxt: sumTxt, nomeExib: nomeExib,
       via: Object.keys(c.vias).join(", ")
     };
   });
@@ -471,6 +484,8 @@ function App(){
   const [recList,setRecList]=useState(null);
   const [tol,setTol]=useState(0.01);
   const [filter,setFilter]=useState("ALL");
+  const [confView,setConfView]=useState("resumida");
+  const [openAg,setOpenAg]=useState({});
   const [err,setErr]=useState("");
 
   const loadTxt = useCallback(function(fileList){
@@ -591,6 +606,107 @@ function App(){
     return s;
   },[results]);
 
+  const agencias = useMemo(function(){
+    if(!txtBlocks) return null;
+    var stMap = {};
+    if(results){ results.rows.forEach(function(r){ stMap[r.empCode+"|"+r.numeroComissao] = r.nfStatus; }); }
+    var byAg = {};
+    txtBlocks.forEach(function(b){
+      var nome = (b.comisNome||"(sem nome)").trim();
+      var k = nome.toUpperCase();
+      if(!byAg[k]) byAg[k] = { nome:nome, bruto:0, ir:0, liquido:0, itens:[], comNF:0, semNF:0 };
+      var a = byAg[k];
+      if(!isNaN(b.totalBruto)) a.bruto += b.totalBruto;
+      if(!isNaN(b.ir)) a.ir += b.ir;
+      if(!isNaN(b.totalLiquido)) a.liquido += b.totalLiquido;
+      var st = stMap[b.empCode+"|"+b.numeroComissao];
+      if(results){ if(st==="NF_OK"||st==="NF_DIVERGE") a.comNF++; else a.semNF++; }
+      a.itens.push({ num:b.numeroComissao, emp:b.empNome, bruto:b.totalBruto, liquido:b.totalLiquido, st:st });
+    });
+    var arr = Object.keys(byAg).map(function(k){ return byAg[k]; });
+    arr.sort(function(x,y){ return y.bruto - x.bruto; });
+    var totBruto = arr.reduce(function(a,x){return a+x.bruto;},0);
+    var totLiq = arr.reduce(function(a,x){return a+x.liquido;},0);
+    var totItens = arr.reduce(function(a,x){return a+x.itens.length;},0);
+    return { arr:arr, totBruto:totBruto, totLiq:totLiq, totItens:totItens };
+  },[txtBlocks,results]);
+
+  function agenciaSection(){
+    if(!agencias) return null;
+    var top = agencias.arr.slice(0, 12);
+    var maxB = top.length ? top[0].bruto : 1;
+    return (
+      <div style={{marginTop:26}}>
+        <h3 style={{fontSize:16,margin:"0 0 2px",color:"var(--navy)"}}>Resumo por Agência <span style={{color:"var(--gray)",fontWeight:400,fontSize:13}}>({agencias.arr.length} agências · {agencias.totItens} comissões · Σ Bruto {fmt(agencias.totBruto)})</span></h3>
+        <p className="muted" style={{margin:"0 0 12px"}}>Somado a partir dos relatórios TXT, por razão social do comissionado.{results?" \"Pendente\" = comissões ainda sem NF/Recibo.":" Carregue NF/Recibo para ver o que está pendente."}</p>
+
+        <div style={{background:"#fff",border:"1px solid var(--line)",borderRadius:10,padding:"14px 16px",marginBottom:14}}>
+          <div style={{fontSize:12,fontWeight:700,color:"var(--gray)",marginBottom:10}}>TOP 12 AGÊNCIAS POR VALOR BRUTO</div>
+          {top.map(function(a,i){
+            var pct = maxB>0 ? Math.max(2, Math.round(a.bruto/maxB*100)) : 0;
+            return (
+              <div key={i} style={{display:"flex",alignItems:"center",gap:10,margin:"5px 0"}}>
+                <div style={{width:190,fontSize:12,color:"var(--ink)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}} title={a.nome}>{a.nome}</div>
+                <div style={{flex:1,background:"#eef1f4",borderRadius:5,height:18,position:"relative"}}>
+                  <div style={{width:pct+"%",background:"var(--teal)",height:18,borderRadius:5}}></div>
+                </div>
+                <div style={{width:110,textAlign:"right",fontSize:12,fontWeight:600,color:"var(--navy)"}}>{fmt(a.bruto)}</div>
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="tblwrap">
+          <table>
+            <thead>
+              <tr>
+                <th style={{width:26}}></th><th>Agência (razão social)</th><th className="num">Comissões</th>
+                <th className="num">Σ Bruto</th><th className="num">Σ IR</th><th className="num">Σ Líquido</th>
+                {results?<th className="num">Com NF/Recibo</th>:null}{results?<th className="num">Pendente</th>:null}
+              </tr>
+            </thead>
+            <tbody>
+              {agencias.arr.map(function(a,i){
+                var k = a.nome.toUpperCase();
+                var isOpen = !!openAg[k];
+                var rows = [
+                  <tr key={"a"+i} style={{cursor:"pointer"}} onClick={function(){ setOpenAg(function(o){ var n=Object.assign({},o); n[k]=!n[k]; return n; }); }}>
+                    <td style={{textAlign:"center",color:"var(--gray)"}}>{isOpen?"▾":"▸"}</td>
+                    <td>{a.nome}</td>
+                    <td className="num">{a.itens.length}</td>
+                    <td className="num">{fmt(a.bruto)}</td>
+                    <td className="num">{fmt(a.ir)}</td>
+                    <td className="num">{fmt(a.liquido)}</td>
+                    {results?<td className="num" style={{color:"var(--ok)"}}>{a.comNF}</td>:null}
+                    {results?<td className="num" style={{color:a.semNF>0?"var(--warn)":"inherit",fontWeight:a.semNF>0?700:400}}>{a.semNF}</td>:null}
+                  </tr>
+                ];
+                if(isOpen){
+                  a.itens.forEach(function(it,j){
+                    var pend = results && !(it.st==="NF_OK"||it.st==="NF_DIVERGE");
+                    rows.push(
+                      <tr key={"a"+i+"i"+j} style={{background:"#f8fafc"}}>
+                        <td></td>
+                        <td style={{paddingLeft:18,color:"var(--gray)",fontSize:12}}>Comissão {it.num} · {it.emp}</td>
+                        <td></td>
+                        <td className="num" style={{fontSize:12}}>{fmt(it.bruto)}</td>
+                        <td></td>
+                        <td className="num" style={{fontSize:12}}>{fmt(it.liquido)}</td>
+                        {results?<td colSpan={2} style={{fontSize:12}}>{pend?<span className="tag warn">pendente NF/Recibo</span>:<span className="tag ok">ok</span>}</td>:null}
+                      </tr>
+                    );
+                  });
+                }
+                return rows;
+              })}
+            </tbody>
+          </table>
+        </div>
+        <p className="muted" style={{marginTop:8}}>Clique numa agência para ver as comissões dela (detalhamento do TXT){results?" e o que está pendente de NF/Recibo":""}.</p>
+      </div>
+    );
+  }
+
   const shown = useMemo(function(){
     if(!results) return [];
     if(filter==="ALL") return results.rows;
@@ -639,17 +755,25 @@ function App(){
 
   function confTable(list, titulo, cor){
     if(!list.length) return null;
+    var resumida = (confView === "resumida");
     return (
       <div style={{marginTop:22}}>
         <h3 style={{fontSize:15,margin:"0 0 8px",color:cor}}>{titulo} <span style={{color:"var(--gray)",fontWeight:400,fontSize:13}}>({list.length})</span></h3>
         <div className="tblwrap">
           <table>
             <thead>
-              <tr>
-                <th>Situação</th><th>Tipo</th><th>Comprov.</th><th>Casou por</th><th>Nº / arquivo</th><th>Relatório (comissões)</th>
-                <th>Comissionado (relatório)</th><th>Prestador</th><th>Razão social</th>
-                <th className="num">Σ Valor</th><th className="num">Σ Ref. relatório</th><th className="num">Diferença</th>
-              </tr>
+              {resumida ? (
+                <tr>
+                  <th>Situação</th><th>Razão social / Comissionado</th><th>Nº comissão</th><th>Nº NF/Recibo</th>
+                  <th className="num">Valor</th><th>Confere?</th>
+                </tr>
+              ) : (
+                <tr>
+                  <th>Situação</th><th>Tipo</th><th>NF/Recibo</th><th>Casou por</th><th>Nº / arquivo</th><th>Nº comissão</th>
+                  <th>Comissionado (relatório)</th><th>Prestador (NF/recibo)</th><th>Razão social</th>
+                  <th className="num">Σ Valor</th><th className="num">Σ Ref. relatório</th><th className="num">Diferença</th>
+                </tr>
+              )}
             </thead>
             <tbody>
               {list.map(function(g,i){
@@ -659,6 +783,31 @@ function App(){
                 var comNomes = uniq(g.dems.map(function(d){return d.comisNome;}).filter(Boolean)).join(" / ");
                 var prestNomes = uniq(g.nfs.map(function(n){return n.prestador;}).filter(Boolean)).join(" / ");
                 var noVal = (g.status==="ORFA"||g.status==="SEM_NUM");
+                var valorConfere = (g.dems.length>0 && !isNaN(g.diff) && Math.abs(g.diff)<=tol);
+                // célula "Razão social / confere?"
+                var razaoCell;
+                if(g.dems.length===0){ razaoCell = "—"; }
+                else if(g.nomeOk){ razaoCell = <span className="tag ok">confere</span>; }
+                else {
+                  razaoCell = (
+                    <span>
+                      <span className="tag err">diverge</span>
+                      {valorConfere ? <span style={{fontSize:11,color:"var(--gray)"}}> · valor bate: TOTVS {fmt(g.sumTotvs)} / TXT {fmt(g.sumTxt)}</span> : null}
+                    </span>
+                  );
+                }
+                if(resumida){
+                  return (
+                    <tr key={i}>
+                      <td>{tagNfRow(g.status)}</td>
+                      <td>{g.nomeExib}</td>
+                      <td>{coms||"—"}</td>
+                      <td>{rps||"—"}</td>
+                      <td className="num">{fmt(g.sumNf)}</td>
+                      <td>{razaoCell}</td>
+                    </tr>
+                  );
+                }
                 return (
                   <tr key={i}>
                     <td>{tagNfRow(g.status)}</td>
@@ -669,7 +818,7 @@ function App(){
                     <td>{coms||"—"}</td>
                     <td>{comNomes||"—"}</td>
                     <td>{prestNomes||"—"}</td>
-                    <td>{g.dems.length===0 ? "—" : (g.nomeOk ? <span className="tag ok">confere</span> : <span className="tag err">diverge</span>)}</td>
+                    <td>{razaoCell}</td>
                     <td className="num">{fmt(g.sumNf)}</td>
                     <td className="num">{fmt(g.sumBruto)}</td>
                     <td className="num" style={{color:(!isNaN(g.diff)&&Math.abs(g.diff)>tol&&!noVal)?"var(--err)":"inherit"}}>{noVal?"—":fmt(g.diff)}</td>
@@ -688,7 +837,7 @@ function App(){
       <header>
         <div className="bar"></div>
         <div>
-          <h1>Checador de Comissão Registrada <span style={{fontSize:12,fontWeight:600,color:"var(--gold)",verticalAlign:"middle"}}>v11</span></h1>
+          <h1>Checador de Comissão Registrada <span style={{fontSize:12,fontWeight:600,color:"var(--gold)",verticalAlign:"middle"}}>v12</span></h1>
           <p>Demonstrativo (TXT) × TOTVS (CO) × Nota Fiscal / Recibo · Rede Gazeta</p>
         </div>
       </header>
@@ -718,9 +867,9 @@ function App(){
             <div className="card"><div className="lbl">Líquido TXT</div><div className="val">{fmt(stats.liquido)}</div></div>
             <div className="card"><div className="lbl">Total TOTVS</div><div className="val">{fmt(stats.valTotvs)}</div></div>
             {hasComp ? [
-              <div className="card" key="cnf"><div className="lbl">Com comprovante OK</div><div className="val" style={{color:"var(--ok)"}}>{stats.COM_NF}</div></div>,
+              <div className="card" key="cnf"><div className="lbl">Com NF/Recibo OK</div><div className="val" style={{color:"var(--ok)"}}>{stats.COM_NF}</div></div>,
               <div className="card" key="dnf"><div className="lbl">Valor diverge</div><div className="val" style={{color:"var(--err)"}}>{stats.NF_DIVERGE}</div></div>,
-              <div className="card" key="snf"><div className="lbl">Sem comprovante</div><div className="val" style={{color:"var(--warn)"}}>{stats.SEM_NF}</div></div>,
+              <div className="card" key="snf"><div className="lbl">Sem NF/Recibo</div><div className="val" style={{color:"var(--warn)"}}>{stats.SEM_NF}</div></div>,
               <div className="card" key="onf"><div className="lbl">Órfã/sem nº</div><div className="val" style={{color:"var(--warn)"}}>{stats.nfOrfas}</div></div>,
               <div className="card" key="rnf"><div className="lbl">Razão social diverge</div><div className="val" style={{color:"var(--err)"}}>{stats.nomeDiverge}</div></div>,
               <div className="card" key="pf"><div className="lbl">Pessoa física (recibo/CPF)</div><div className="val" style={{color:"var(--teal)"}}>{stats.pfOk}</div></div>,
@@ -738,7 +887,7 @@ function App(){
           </div>
 
           <div className="filters">
-            {[["ALL","Todos"],["DIVERGE","Divergentes"],["OK","OK"],["SO_TXT","Só no TXT"],["SO_TOTVS","Só no TOTVS"]].concat(hasComp?[["SEM_NF","Sem comprovante"],["NF_DIVERGE","Valor diverge"]]:[]).map(function(f){
+            {[["ALL","Todos"],["DIVERGE","Divergentes"],["OK","OK"],["SO_TXT","Só no TXT"],["SO_TOTVS","Só no TOTVS"]].concat(hasComp?[["SEM_NF","Sem NF/Recibo"],["NF_DIVERGE","Valor diverge"]]:[]).map(function(f){
               return <div key={f[0]} className={"chip"+(filter===f[0]?" active":"")} onClick={function(){setFilter(f[0]);}}>{f[1]}</div>;
             })}
           </div>
@@ -781,18 +930,33 @@ function App(){
 
           {hasComp && results.groups.length ? (
             <div style={{marginTop:20}}>
-              <h3 style={{fontSize:16,margin:"0 0 2px",color:"var(--navy)"}}>Conferência Relatório × Comprovante</h3>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8}}>
+                <h3 style={{fontSize:16,margin:"0",color:"var(--navy)"}}>Conferência Relatório × Nota Fiscal / Recibo</h3>
+                <div className="seg">
+                  <button className={confView==="resumida"?"on":""} onClick={function(){setConfView("resumida");}}>Resumida</button>
+                  <button className={confView==="detalhada"?"on":""} onClick={function(){setConfView("detalhada");}}>Detalhada</button>
+                </div>
+              </div>
+              <p className="muted" style={{margin:"4px 0 0"}}>
+                <b>Nota Fiscal / Recibo</b> = o documento que o comissionado emite: a <b>empresa (PJ)</b> emite <b>Nota Fiscal</b>; a <b>pessoa física (PF)</b> emite <b>Recibo</b>. A conferência confirma que esse documento existe e bate com a comissão paga.
+              </p>
               {confTable(results.groups.filter(function(g){return !g.pf;}), "Pessoa jurídica — Nota Fiscal", "var(--navy2)")}
               {confTable(results.groups.filter(function(g){return g.pf;}), "Pessoa física — Recibo / CPF", "var(--teal)")}
               <p className="muted" style={{marginTop:10}}>
-                <b>Tipo</b> = comprovantes : relatórios do grupo (1:1, 1:N, N:1, N:M). PJ emite NF (retém IR); PF emite recibo (retém INSS) — a conciliação compara pelo <b>bruto</b> quando há demonstrativo e pelo <b>líquido</b> quando a comissão só existe no TOTVS. Casamento por número da comissão, número da fatura ou razão social + valor + empresa. "Órfã/sem nº" = comprovante que não casou com nenhuma comissão carregada.
+                Na visão <b>Resumida</b>: razão social, nº da comissão, nº da NF/recibo, valor e se confere. A <b>Detalhada</b> mostra também como casou e a diferença. Quando a razão social <b>diverge mas o valor bate</b>, o sistema mostra os valores TOTVS e TXT para você confirmar que é só diferença de nome. "Órfã/sem nº" = NF/recibo que não casou com nenhuma comissão carregada.
               </p>
             </div>
           ) : null}
         </div>
-      ) : (
+      ) : null}
+
+      {txtBlocks && !results ? (
+        <p className="muted" style={{margin:"12px 0"}}>Carregue também o Excel do TOTVS para a conciliação completa — o resumo por agência abaixo já usa só os TXT.</p>
+      ) : null}
+      {txtBlocks ? agenciaSection() : null}
+      {!txtBlocks ? (
         <p className="muted" style={{marginTop:24}}>Carregue o TXT e o Excel para rodar a checagem. Notas Fiscais (PDF) e Recibos (TXT, pessoa física) são opcionais e habilitam a conferência do comprovante.</p>
-      )}
+      ) : null}
     </div>
   );
 }
