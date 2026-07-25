@@ -738,10 +738,10 @@ function App(){
     return <span className="tag warn">Só no TOTVS</span>;
   }
   function tagNf(st){
-    if(st==="NF_OK") return <span className="tag ok">comprov. ok</span>;
+    if(st==="NF_OK") return <span className="tag ok">NF/Recibo ok</span>;
     if(st==="NF_DIVERGE") return <span className="tag err">valor diverge</span>;
     if(st==="SO_TOTVS") return "—";
-    return <span className="tag warn">sem comprov.</span>;
+    return <span className="tag warn">sem NF/Recibo</span>;
   }
   function tagNfRow(st){
     if(st==="NF_OK") return <span className="tag ok">OK</span>;
@@ -837,7 +837,7 @@ function App(){
       <header>
         <div className="bar"></div>
         <div>
-          <h1>Checador de Comissão Registrada <span style={{fontSize:12,fontWeight:600,color:"var(--gold)",verticalAlign:"middle"}}>v12</span></h1>
+          <h1>Checador de Comissão Registrada <span style={{fontSize:12,fontWeight:600,color:"var(--gold)",verticalAlign:"middle"}}>v13</span></h1>
           <p>Demonstrativo (TXT) × TOTVS (CO) × Nota Fiscal / Recibo · Rede Gazeta</p>
         </div>
       </header>
@@ -899,7 +899,7 @@ function App(){
                   <th>Status</th><th>Emp</th><th>Nº Comissão / Título</th><th>Comissionado</th>
                   <th>Fornec TOTVS</th><th className="num">Bruto (TXT)</th><th className="num">IR</th>
                   <th className="num">Líquido (TXT)</th><th className="num">Vl Original (TOTVS)</th>
-                  <th className="num">Diferença</th>{hasComp?<th>Comprov.</th>:null}<th>Vencto</th>
+                  <th className="num">Diferença</th>{hasComp?<th>NF/Recibo</th>:null}<th>Vencto</th>
                 </tr>
               </thead>
               <tbody>
@@ -955,7 +955,7 @@ function App(){
       ) : null}
       {txtBlocks ? agenciaSection() : null}
       {!txtBlocks ? (
-        <p className="muted" style={{marginTop:24}}>Carregue o TXT e o Excel para rodar a checagem. Notas Fiscais (PDF) e Recibos (TXT, pessoa física) são opcionais e habilitam a conferência do comprovante.</p>
+        <p className="muted" style={{marginTop:24}}>Carregue o TXT e o Excel para rodar a checagem. Notas Fiscais (PDF) e Recibos (TXT, pessoa física) são opcionais e habilitam a conferência da NF/Recibo.</p>
       ) : null}
     </div>
   );
