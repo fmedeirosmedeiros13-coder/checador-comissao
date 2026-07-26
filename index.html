@@ -9,6 +9,7 @@
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <style>
   :root{
     --navy:#0d2340; --navy2:#16345c; --gold:#c9a227; --teal:#0f6e56;
@@ -168,7 +169,24 @@ function parseXlsx(arrayBuffer){
 }
 
 // ---- Extrai texto de um PDF (pdf.js) ----
-function pdfToText(arrayBuffer){
+// Renderiza uma página do PDF e lê por OCR (usado só quando não há texto)
+function ocrPage(pdf, p){
+  return pdf.getPage(p).then(function(page){
+    var base = page.getViewport({scale:1});
+    var scale = Math.min(3.2, Math.max(1.8, 2200/base.width));
+    var vp = page.getViewport({scale:scale});
+    var canvas = document.createElement("canvas");
+    canvas.width = vp.width; canvas.height = vp.height;
+    var ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#fff"; ctx.fillRect(0,0,canvas.width,canvas.height);
+    return page.render({canvasContext:ctx, viewport:vp}).promise.then(function(){
+      return Tesseract.recognize(canvas, "por").then(function(res){ return (res.data && res.data.text) || ""; });
+    });
+  });
+}
+
+// Extrai texto da NF; se não houver camada de texto, tenta OCR. Devolve {text, ocr, noText}.
+function pdfExtract(arrayBuffer){
   return pdfjsLib.getDocument({data: arrayBuffer}).promise.then(function(pdf){
     var pages = [];
     for(var p=1;p<=pdf.numPages;p++){ pages.push(p); }
@@ -180,7 +198,15 @@ function pdfToText(arrayBuffer){
           });
         });
       });
-    }, Promise.resolve(""));
+    }, Promise.resolve("")).then(function(text){
+      var clean = (text||"").replace(/\s/g,"");
+      if(clean.length >= 40){ return { text:text, ocr:false, noText:false }; }
+      // sem camada de texto -> OCR (se disponível)
+      if(typeof Tesseract === "undefined"){ return { text:text, ocr:false, noText:true }; }
+      return pages.reduce(function(chain, p){
+        return chain.then(function(acc){ return ocrPage(pdf, p).then(function(t){ return acc + " " + t; }); });
+      }, Promise.resolve("")).then(function(otext){ return { text:otext, ocr:true, noText:true }; });
+    });
   });
 }
 
@@ -379,6 +405,13 @@ function reconcile(txtBlocks, totvsRows, nfList, tol){
       if(vias[key(r)]) return;
       if((r.faturas || []).some(function(f){ return numInText(f, nf.textUpper); })){ resolved.push(r); vias[key(r)] = "fatura"; }
     });
+    // 2b) número digitado manualmente pelo usuário (para NFs sem leitura)
+    if(nf.manualNum){
+      results.forEach(function(r){
+        if(vias[key(r)]) return;
+        if(normInt(r.numeroComissao) === normInt(nf.manualNum)){ resolved.push(r); vias[key(r)] = "manual"; }
+      });
+    }
     // 3) fallback: razão social + valor (bruto/líquido/TOTVS) + empresa — só se nada casou
     if(resolved.length === 0){
       results.forEach(function(r){
@@ -486,6 +519,7 @@ function App(){
   const [filter,setFilter]=useState("ALL");
   const [confView,setConfView]=useState("resumida");
   const [openAg,setOpenAg]=useState({});
+  const [manualNums,setManualNums]=useState({});
   const [err,setErr]=useState("");
 
   const loadTxt = useCallback(function(fileList){
@@ -539,18 +573,29 @@ function App(){
       return new Promise(function(resolve,reject){
         var reader = new FileReader();
         reader.onload = function(){
-          pdfToText(new Uint8Array(reader.result)).then(function(text){
-            resolve(parseNf(text, file.name));
-          }).catch(reject);
+          pdfExtract(new Uint8Array(reader.result)).then(function(r){
+            var nf = parseNf(r.text, file.name);
+            nf.ocr = r.ocr; nf.noText = r.noText;
+            resolve(nf);
+          }).catch(function(e){ resolve(parseNf("", file.name)); }); // nunca trava o lote
         };
-        reader.onerror = function(){ reject(new Error("Falha ao ler "+file.name)); };
+        reader.onerror = function(){ resolve(parseNf("", file.name)); };
         reader.readAsArrayBuffer(file);
       });
     };
-    Promise.all(files.map(readOne)).then(function(list){
-      var comTotal = list.reduce(function(a,n){return a + (n.candidatos ? n.candidatos.length : 0);},0);
-      setNfList(list);
-      setNfName(files.length + " NF(s) · " + comTotal + " nº citado(s) detectado(s)");
+    // sequencial (OCR é pesado) com progresso
+    var out = [];
+    files.reduce(function(chain, file, i){
+      return chain.then(function(){
+        setNfName("Processando NF " + (i+1) + "/" + files.length + "…");
+        return readOne(file).then(function(nf){ out.push(nf); });
+      });
+    }, Promise.resolve()).then(function(){
+      var comTotal = out.reduce(function(a,n){return a + (n.candidatos ? n.candidatos.length : 0);},0);
+      var nOcr = out.filter(function(n){return n.ocr;}).length;
+      var nSem = out.filter(function(n){return n.noText && !n.ocr;}).length;
+      setNfList(out);
+      setNfName(files.length + " NF(s) · " + comTotal + " nº detectado(s)" + (nOcr?(" · "+nOcr+" via OCR"):"") + (nSem?(" · "+nSem+" sem texto"):""));
     }).catch(function(e){ setErr("Erro na NF (PDF): "+(e && e.message ? e.message : e)); });
   },[]);
 
@@ -578,9 +623,13 @@ function App(){
 
   const results = useMemo(function(){
     if(!txtBlocks||!totvsRows) return null;
-    var comprovantes = (nfList || []).concat(recList || []);
+    var nfs = (nfList || []).map(function(n){
+      var mn = manualNums[n.fileName];
+      return mn ? Object.assign({}, n, {manualNum: mn}) : n;
+    });
+    var comprovantes = nfs.concat(recList || []);
     return reconcile(txtBlocks, totvsRows, comprovantes, tol);
-  },[txtBlocks,totvsRows,nfList,recList,tol]);
+  },[txtBlocks,totvsRows,nfList,recList,tol,manualNums]);
 
   const stats = useMemo(function(){
     if(!results) return null;
@@ -703,6 +752,51 @@ function App(){
           </table>
         </div>
         <p className="muted" style={{marginTop:8}}>Clique numa agência para ver as comissões dela (detalhamento do TXT){results?" e o que está pendente de NF/Recibo":""}.</p>
+      </div>
+    );
+  }
+
+  const notasProblema = useMemo(function(){
+    if(!nfList || !nfList.length) return [];
+    var matched = {};
+    if(results){ results.groups.forEach(function(g){ if(g.dems.length>0){ g.nfs.forEach(function(n){ if((n.tipo||"NF")!=="Recibo") matched[n.fileName]=true; }); } }); }
+    return nfList.filter(function(n){ return !matched[n.fileName]; });
+  },[nfList,results]);
+
+  function setManual(file, val){
+    setManualNums(function(o){ var n=Object.assign({},o); if(val) n[file]=val.replace(/\D/g,""); else delete n[file]; return n; });
+  }
+
+  function notasProblemaSection(){
+    if(!notasProblema.length) return null;
+    return (
+      <div style={{marginTop:22}}>
+        <h3 style={{fontSize:15,margin:"0 0 4px",color:"var(--warn)"}}>Notas fiscais não conferidas automaticamente <span style={{color:"var(--gray)",fontWeight:400,fontSize:13}}>({notasProblema.length})</span></h3>
+        <p className="muted" style={{margin:"0 0 10px"}}>NFs em que o sistema não achou o número da comissão (nota sem texto, imagem, ou número não localizado). Digite o número da comissão para casar na mão.</p>
+        <div className="tblwrap">
+          <table>
+            <thead><tr><th>Arquivo</th><th>Leitura</th><th>Nº encontrados</th><th>Digite o nº da comissão</th></tr></thead>
+            <tbody>
+              {notasProblema.map(function(n,i){
+                var leitura = n.ocr ? <span className="tag warn">imagem (OCR)</span> : (n.noText ? <span className="tag err">sem texto</span> : <span className="tag">texto</span>);
+                return (
+                  <tr key={i}>
+                    <td>{n.fileName}</td>
+                    <td>{leitura}</td>
+                    <td>{(n.candidatos&&n.candidatos.length)?n.candidatos.join(", "):"—"}</td>
+                    <td>
+                      <input type="text" inputMode="numeric" placeholder="ex.: 2452"
+                        defaultValue={manualNums[n.fileName]||""}
+                        onChange={function(e){ setManual(n.fileName, e.target.value); }}
+                        style={{width:120,padding:"5px 8px",border:"1px solid var(--line)",borderRadius:6,fontSize:13}} />
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        <p className="muted" style={{marginTop:8}}>Ao digitar um número que exista nos relatórios, a nota casa e sai desta lista. Melhor solução definitiva: baixar a NFSe <b>original</b> do portal (com texto), em vez da versão "impressa em PDF".</p>
       </div>
     );
   }
@@ -837,7 +931,7 @@ function App(){
       <header>
         <div className="bar"></div>
         <div>
-          <h1>Checador de Comissão Registrada <span style={{fontSize:12,fontWeight:600,color:"var(--gold)",verticalAlign:"middle"}}>v13</span></h1>
+          <h1>Checador de Comissão Registrada <span style={{fontSize:12,fontWeight:600,color:"var(--gold)",verticalAlign:"middle"}}>v14</span></h1>
           <p>Demonstrativo (TXT) × TOTVS (CO) × Nota Fiscal / Recibo · Rede Gazeta</p>
         </div>
       </header>
@@ -942,6 +1036,7 @@ function App(){
               </p>
               {confTable(results.groups.filter(function(g){return !g.pf;}), "Pessoa jurídica — Nota Fiscal", "var(--navy2)")}
               {confTable(results.groups.filter(function(g){return g.pf;}), "Pessoa física — Recibo / CPF", "var(--teal)")}
+              {notasProblemaSection()}
               <p className="muted" style={{marginTop:10}}>
                 Na visão <b>Resumida</b>: razão social, nº da comissão, nº da NF/recibo, valor e se confere. A <b>Detalhada</b> mostra também como casou e a diferença. Quando a razão social <b>diverge mas o valor bate</b>, o sistema mostra os valores TOTVS e TXT para você confirmar que é só diferença de nome. "Órfã/sem nº" = NF/recibo que não casou com nenhuma comissão carregada.
               </p>
