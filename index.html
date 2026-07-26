@@ -388,7 +388,7 @@ function reconcile(txtBlocks, totvsRows, nfList, tol){
     });
   });
 
-  // ---- Camada Comprovante (NF/Recibo): gabarito contra TODOS os títulos ----
+  // ---- Camada Comprovante (NF/Relatório de comissão): gabarito contra TODOS os títulos ----
   // inclui os "Só no TOTVS" (ex.: pessoa física sem demonstrativo TXT) para o comprovante encostar.
   var validNums = {};
   results.forEach(function(r){ validNums[r.numeroComissao] = true; });
@@ -687,7 +687,7 @@ function App(){
     return (
       <div style={{marginTop:26}}>
         <h3 style={{fontSize:16,margin:"0 0 2px",color:"var(--navy)"}}>Resumo por Agência <span style={{color:"var(--gray)",fontWeight:400,fontSize:13}}>({agencias.arr.length} agências · {agencias.totItens} comissões · Σ Bruto {fmt(agencias.totBruto)})</span></h3>
-        <p className="muted" style={{margin:"0 0 12px"}}>Somado a partir dos relatórios TXT, por razão social do comissionado.{results?" \"Pendente\" = comissões ainda sem NF/Recibo.":" Carregue NF/Recibo para ver o que está pendente."}</p>
+        <p className="muted" style={{margin:"0 0 12px"}}>Somado a partir dos relatórios TXT, por razão social do comissionado.{results?" \"Pendente\" = comissões ainda sem NF/Relatório de comissão.":" Carregue NF/Relatório de comissão para ver o que está pendente."}</p>
 
         <div style={{background:"#fff",border:"1px solid var(--line)",borderRadius:10,padding:"14px 16px",marginBottom:14}}>
           <div style={{fontSize:12,fontWeight:700,color:"var(--gray)",marginBottom:10}}>TOP 12 AGÊNCIAS POR VALOR BRUTO</div>
@@ -711,7 +711,7 @@ function App(){
               <tr>
                 <th style={{width:26}}></th><th>Agência (razão social)</th><th className="num">Comissões</th>
                 <th className="num">Σ Bruto</th><th className="num">Σ IR</th><th className="num">Σ Líquido</th>
-                {results?<th className="num">Com NF/Recibo</th>:null}{results?<th className="num">Pendente</th>:null}
+                {results?<th className="num">Com NF/Relatório de comissão</th>:null}{results?<th className="num">Pendente</th>:null}
               </tr>
             </thead>
             <tbody>
@@ -741,7 +741,7 @@ function App(){
                         <td className="num" style={{fontSize:12}}>{fmt(it.bruto)}</td>
                         <td></td>
                         <td className="num" style={{fontSize:12}}>{fmt(it.liquido)}</td>
-                        {results?<td colSpan={2} style={{fontSize:12}}>{pend?<span className="tag warn">pendente NF/Recibo</span>:<span className="tag ok">ok</span>}</td>:null}
+                        {results?<td colSpan={2} style={{fontSize:12}}>{pend?<span className="tag warn">pendente NF/Relatório de comissão</span>:<span className="tag ok">ok</span>}</td>:null}
                       </tr>
                     );
                   });
@@ -751,7 +751,7 @@ function App(){
             </tbody>
           </table>
         </div>
-        <p className="muted" style={{marginTop:8}}>Clique numa agência para ver as comissões dela (detalhamento do TXT){results?" e o que está pendente de NF/Recibo":""}.</p>
+        <p className="muted" style={{marginTop:8}}>Clique numa agência para ver as comissões dela (detalhamento do TXT){results?" e o que está pendente de NF/Relatório de comissão":""}.</p>
       </div>
     );
   }
@@ -832,10 +832,10 @@ function App(){
     return <span className="tag warn">Só no TOTVS</span>;
   }
   function tagNf(st){
-    if(st==="NF_OK") return <span className="tag ok">NF/Recibo ok</span>;
+    if(st==="NF_OK") return <span className="tag ok">conferido</span>;
     if(st==="NF_DIVERGE") return <span className="tag err">valor diverge</span>;
     if(st==="SO_TOTVS") return "—";
-    return <span className="tag warn">sem NF/Recibo</span>;
+    return <span className="tag warn">sem documento</span>;
   }
   function tagNfRow(st){
     if(st==="NF_OK") return <span className="tag ok">OK</span>;
@@ -858,13 +858,13 @@ function App(){
             <thead>
               {resumida ? (
                 <tr>
-                  <th>Situação</th><th>Razão social / Comissionado</th><th>Nº comissão</th><th>Nº NF/Recibo</th>
+                  <th>Situação</th><th>Razão social / Comissionado</th><th>Nº comissão</th><th>Nº NF/Relatório de comissão</th>
                   <th className="num">Valor</th><th>Confere?</th>
                 </tr>
               ) : (
                 <tr>
-                  <th>Situação</th><th>Tipo</th><th>NF/Recibo</th><th>Casou por</th><th>Nº / arquivo</th><th>Nº comissão</th>
-                  <th>Comissionado (relatório)</th><th>Prestador (NF/recibo)</th><th>Razão social</th>
+                  <th>Situação</th><th>Tipo</th><th>NF/Relatório de comissão</th><th>Casou por</th><th>Nº / arquivo</th><th>Nº comissão</th>
+                  <th>Comissionado (relatório)</th><th>Prestador (NF/Relatório de comissão)</th><th>Razão social</th>
                   <th className="num">Σ Valor</th><th className="num">Σ Ref. relatório</th><th className="num">Diferença</th>
                 </tr>
               )}
@@ -886,23 +886,39 @@ function App(){
                   razaoCell = (
                     <span>
                       <span className="tag err">diverge</span>
-                      {valorConfere ? <span style={{fontSize:11,color:"var(--gray)"}}> · valor bate: TOTVS {fmt(g.sumTotvs)} / TXT {fmt(g.sumTxt)}</span> : null}
+                      {valorConfere ? <span style={{fontSize:11,color:"var(--gray)"}}> · valor bate</span> : null}
                     </span>
                   );
                 }
-                if(resumida){
-                  return (
-                    <tr key={i}>
-                      <td>{tagNfRow(g.status)}</td>
-                      <td>{g.nomeExib}</td>
-                      <td>{coms||"—"}</td>
-                      <td>{rps||"—"}</td>
-                      <td className="num">{fmt(g.sumNf)}</td>
-                      <td>{razaoCell}</td>
-                    </tr>
-                  );
+                // descrição separada da divergência: quem diverge e por quê
+                var divergs = [];
+                if(g.status==="NF_DIVERGE"){
+                  divergs.push("Valor diverge — documento (NF/Relatório): " + fmt(g.sumNf) + "  ×  relatório de comissão (TXT): " + fmt(g.sumBruto) + "   →   diferença de " + fmt(Math.abs(g.diff)) + (g.diff>0?" (documento a mais)":" (documento a menos)"));
                 }
-                return (
+                if(g.dems.length>0 && !g.nomeOk){
+                  divergs.push("Razão social diverge — no relatório: \"" + (comNomes||"—") + "\"   ×   no documento: \"" + (prestNomes||"—") + "\"" + (valorConfere ? ("   ·   o valor confere (TOTVS " + fmt(g.sumTotvs) + " / TXT " + fmt(g.sumTxt) + ") — provável só diferença de nome") : ""));
+                }
+                if(g.dems.length===0){
+                  divergs.push("Não casou com nenhuma comissão carregada" + (g.orfaos.length ? (" — número citado no documento: " + g.orfaos.join(", ")) : "") + ". Confira o número ou o cadastro.");
+                }
+                var descRow = divergs.length ? (
+                  <tr key={"d"+i} style={{background:"var(--warnbg)"}}>
+                    <td></td>
+                    <td colSpan={resumida?5:11} style={{fontSize:12,color:"var(--ink)"}}>
+                      {divergs.map(function(d,j){ return <div key={j} style={{padding:"1px 0"}}>⚠ {d}</div>; })}
+                    </td>
+                  </tr>
+                ) : null;
+                var mainRow = resumida ? (
+                  <tr key={i}>
+                    <td>{tagNfRow(g.status)}</td>
+                    <td>{g.nomeExib}</td>
+                    <td>{coms||"—"}</td>
+                    <td>{rps||"—"}</td>
+                    <td className="num">{fmt(g.sumNf)}</td>
+                    <td>{razaoCell}</td>
+                  </tr>
+                ) : (
                   <tr key={i}>
                     <td>{tagNfRow(g.status)}</td>
                     <td>{g.cardinal}</td>
@@ -918,6 +934,7 @@ function App(){
                     <td className="num" style={{color:(!isNaN(g.diff)&&Math.abs(g.diff)>tol&&!noVal)?"var(--err)":"inherit"}}>{noVal?"—":fmt(g.diff)}</td>
                   </tr>
                 );
+                return [mainRow, descRow];
               })}
             </tbody>
           </table>
@@ -931,8 +948,8 @@ function App(){
       <header>
         <div className="bar"></div>
         <div>
-          <h1>Checador de Comissão Registrada <span style={{fontSize:12,fontWeight:600,color:"var(--gold)",verticalAlign:"middle"}}>v14</span></h1>
-          <p>Demonstrativo (TXT) × TOTVS (CO) × Nota Fiscal / Recibo · Rede Gazeta</p>
+          <h1>Checador de Comissão Registrada <span style={{fontSize:12,fontWeight:600,color:"var(--gold)",verticalAlign:"middle"}}>v15</span></h1>
+          <p>Demonstrativo (TXT) × TOTVS (CO) × Nota Fiscal / Relatório de comissão · Rede Gazeta</p>
         </div>
       </header>
 
@@ -961,12 +978,12 @@ function App(){
             <div className="card"><div className="lbl">Líquido TXT</div><div className="val">{fmt(stats.liquido)}</div></div>
             <div className="card"><div className="lbl">Total TOTVS</div><div className="val">{fmt(stats.valTotvs)}</div></div>
             {hasComp ? [
-              <div className="card" key="cnf"><div className="lbl">Com NF/Recibo OK</div><div className="val" style={{color:"var(--ok)"}}>{stats.COM_NF}</div></div>,
+              <div className="card" key="cnf"><div className="lbl">Com NF/Relatório de comissão OK</div><div className="val" style={{color:"var(--ok)"}}>{stats.COM_NF}</div></div>,
               <div className="card" key="dnf"><div className="lbl">Valor diverge</div><div className="val" style={{color:"var(--err)"}}>{stats.NF_DIVERGE}</div></div>,
-              <div className="card" key="snf"><div className="lbl">Sem NF/Recibo</div><div className="val" style={{color:"var(--warn)"}}>{stats.SEM_NF}</div></div>,
+              <div className="card" key="snf"><div className="lbl">Sem NF/Relatório de comissão</div><div className="val" style={{color:"var(--warn)"}}>{stats.SEM_NF}</div></div>,
               <div className="card" key="onf"><div className="lbl">Órfã/sem nº</div><div className="val" style={{color:"var(--warn)"}}>{stats.nfOrfas}</div></div>,
               <div className="card" key="rnf"><div className="lbl">Razão social diverge</div><div className="val" style={{color:"var(--err)"}}>{stats.nomeDiverge}</div></div>,
-              <div className="card" key="pf"><div className="lbl">Pessoa física (recibo/CPF)</div><div className="val" style={{color:"var(--teal)"}}>{stats.pfOk}</div></div>,
+              <div className="card" key="pf"><div className="lbl">Pessoa física (relatório de comissão)</div><div className="val" style={{color:"var(--teal)"}}>{stats.pfOk}</div></div>,
               <div className="card" key="pj"><div className="lbl">Pessoa jurídica (NF)</div><div className="val" style={{color:"var(--navy2)"}}>{stats.pjOk}</div></div>
             ] : null}
           </div>
@@ -981,7 +998,7 @@ function App(){
           </div>
 
           <div className="filters">
-            {[["ALL","Todos"],["DIVERGE","Divergentes"],["OK","OK"],["SO_TXT","Só no TXT"],["SO_TOTVS","Só no TOTVS"]].concat(hasComp?[["SEM_NF","Sem NF/Recibo"],["NF_DIVERGE","Valor diverge"]]:[]).map(function(f){
+            {[["ALL","Todos"],["DIVERGE","Divergentes"],["OK","OK"],["SO_TXT","Só no TXT"],["SO_TOTVS","Só no TOTVS"]].concat(hasComp?[["SEM_NF","Sem NF/Relatório de comissão"],["NF_DIVERGE","Valor diverge"]]:[]).map(function(f){
               return <div key={f[0]} className={"chip"+(filter===f[0]?" active":"")} onClick={function(){setFilter(f[0]);}}>{f[1]}</div>;
             })}
           </div>
@@ -993,7 +1010,7 @@ function App(){
                   <th>Status</th><th>Emp</th><th>Nº Comissão / Título</th><th>Comissionado</th>
                   <th>Fornec TOTVS</th><th className="num">Bruto (TXT)</th><th className="num">IR</th>
                   <th className="num">Líquido (TXT)</th><th className="num">Vl Original (TOTVS)</th>
-                  <th className="num">Diferença</th>{hasComp?<th>NF/Recibo</th>:null}<th>Vencto</th>
+                  <th className="num">Diferença</th>{hasComp?<th>NF/Relatório de comissão</th>:null}<th>Vencto</th>
                 </tr>
               </thead>
               <tbody>
@@ -1003,7 +1020,7 @@ function App(){
                       <td>{tagOf(r.status)}</td>
                       <td>{r.empCode}{r.empNome?(" - "+r.empNome):""}</td>
                       <td>{r.numeroComissao}{r.nTitulos>1?(" ("+r.nTitulos+" tít.)"):""}</td>
-                      <td>{r.comisNome || r.compNome || "—"}{(!r.comisNome && r.compNome)?<span style={{color:"var(--gray)",fontSize:11}}> (da NF/recibo)</span>:null}</td>
+                      <td>{r.comisNome || r.compNome || "—"}{(!r.comisNome && r.compNome)?<span style={{color:"var(--gray)",fontSize:11}}> (da NF/Relatório de comissão)</span>:null}</td>
                       <td>{r.fornecTotvs||"—"}</td>
                       <td className="num">{fmt(r.bruto)}</td>
                       <td className="num" style={{color:(!isNaN(r.ir)&&r.ir>0)?"var(--gold)":"inherit"}}>{fmt(r.ir)}</td>
@@ -1025,20 +1042,20 @@ function App(){
           {hasComp && results.groups.length ? (
             <div style={{marginTop:20}}>
               <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8}}>
-                <h3 style={{fontSize:16,margin:"0",color:"var(--navy)"}}>Conferência Relatório × Nota Fiscal / Recibo</h3>
+                <h3 style={{fontSize:16,margin:"0",color:"var(--navy)"}}>Conferência Relatório × Nota Fiscal / Relatório de comissão</h3>
                 <div className="seg">
                   <button className={confView==="resumida"?"on":""} onClick={function(){setConfView("resumida");}}>Resumida</button>
                   <button className={confView==="detalhada"?"on":""} onClick={function(){setConfView("detalhada");}}>Detalhada</button>
                 </div>
               </div>
               <p className="muted" style={{margin:"4px 0 0"}}>
-                <b>Nota Fiscal / Recibo</b> = o documento que o comissionado emite: a <b>empresa (PJ)</b> emite <b>Nota Fiscal</b>; a <b>pessoa física (PF)</b> emite <b>Recibo</b>. A conferência confirma que esse documento existe e bate com a comissão paga.
+                <b>Nota Fiscal / Relatório de comissão</b> = o documento que o comissionado emite: a <b>empresa (PJ)</b> emite <b>Nota Fiscal</b>; a <b>pessoa física (PF)</b> emite o <b>Relatório de comissão</b> (recibo). A conferência confirma que esse documento existe e bate com a comissão paga.
               </p>
               {confTable(results.groups.filter(function(g){return !g.pf;}), "Pessoa jurídica — Nota Fiscal", "var(--navy2)")}
-              {confTable(results.groups.filter(function(g){return g.pf;}), "Pessoa física — Recibo / CPF", "var(--teal)")}
+              {confTable(results.groups.filter(function(g){return g.pf;}), "Pessoa física — Relatório de comissão / CPF", "var(--teal)")}
               {notasProblemaSection()}
               <p className="muted" style={{marginTop:10}}>
-                Na visão <b>Resumida</b>: razão social, nº da comissão, nº da NF/recibo, valor e se confere. A <b>Detalhada</b> mostra também como casou e a diferença. Quando a razão social <b>diverge mas o valor bate</b>, o sistema mostra os valores TOTVS e TXT para você confirmar que é só diferença de nome. "Órfã/sem nº" = NF/recibo que não casou com nenhuma comissão carregada.
+                Na visão <b>Resumida</b>: razão social, nº da comissão, nº da NF/Relatório de comissão, valor e se confere. A <b>Detalhada</b> mostra também como casou e a diferença. Quando a razão social <b>diverge mas o valor bate</b>, o sistema mostra os valores TOTVS e TXT para você confirmar que é só diferença de nome. "Órfã/sem nº" = NF/Relatório de comissão que não casou com nenhuma comissão carregada.
               </p>
             </div>
           ) : null}
@@ -1050,7 +1067,7 @@ function App(){
       ) : null}
       {txtBlocks ? agenciaSection() : null}
       {!txtBlocks ? (
-        <p className="muted" style={{marginTop:24}}>Carregue o TXT e o Excel para rodar a checagem. Notas Fiscais (PDF) e Recibos (TXT, pessoa física) são opcionais e habilitam a conferência da NF/Recibo.</p>
+        <p className="muted" style={{marginTop:24}}>Carregue o TXT e o Excel para rodar a checagem. Notas Fiscais (PDF) e Recibos (TXT, pessoa física) são opcionais e habilitam a conferência da NF/Relatório de comissão.</p>
       ) : null}
     </div>
   );
