@@ -495,6 +495,7 @@ function reconcile(txtBlocks, totvsRows, nfList, tol){
       d.nfStatus = (status === "NF_DIVERGE") ? "NF_DIVERGE" : "NF_OK";
       d.nfNomeOk = nomeOk;
       d.compNome = uniq(c.nfs.map(function(n){ return n.prestador; }).filter(Boolean)).join(" / ");
+      d.nfValor = sumNf;   // valor lido no documento (para exibir em caso de divergência)
     });
     return {
       nfs: c.nfs, dems: dems, sumNf: sumNf, sumBruto: sumRef, diff: diff,
@@ -1094,7 +1095,7 @@ function App(){
       <header>
         <div className="bar"></div>
         <div>
-          <h1>Checador de Comissão Registrada <span style={{fontSize:12,fontWeight:600,color:"var(--gold)",verticalAlign:"middle"}}>v17</span></h1>
+          <h1>Checador de Comissão Registrada <span style={{fontSize:12,fontWeight:600,color:"var(--gold)",verticalAlign:"middle"}}>v18</span></h1>
           <p>Demonstrativo (TXT) × TOTVS (CO) × Nota Fiscal / Relatório de comissão · Rede Gazeta</p>
         </div>
       </header>
@@ -1173,7 +1174,7 @@ function App(){
                       <td className="num">{fmt(r.liquido)}</td>
                       <td className="num">{fmt(r.valorTotvs)}</td>
                       <td className="num" style={{color: (!isNaN(r.diff)&&Math.abs(r.diff)>tol)?"var(--err)":"inherit"}}>{fmt(r.diff)}</td>
-                      {hasComp?<td>{tagNf(r.nfStatus)}{r.nfRps?(" "+r.nfRps):""}</td>:null}
+                      {hasComp?<td>{tagNf(r.nfStatus)}{r.nfRps?<span style={{color:"var(--gray)",fontSize:11}}> · NF nº {r.nfRps}</span>:null}{r.nfStatus==="NF_DIVERGE"?<span style={{color:"var(--err)",fontSize:11}}> · doc {fmt(r.nfValor)}</span>:null}</td>:null}
                       <td>{vencStr(r.vencto)}</td>
                     </tr>
                   );
