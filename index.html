@@ -230,10 +230,14 @@ function parseNf(text, fileName){
   var reM = /([0-9][0-9.]*,[0-9]{2})/g, mm;
   while((mm = reM.exec(text)) !== null){ var v = parseBRNumber(mm[1]); if(!isNaN(v)) moneys.push(v); }
   var maxMoney = moneys.length ? Math.max.apply(null, moneys) : NaN;
-  // valor do serviço (bruto): rótulo genérico; se falhar, cai no maior valor
-  var mVs = text.match(/VALOR\s+(?:DO\s+)?SERVI[ÇC]O[\s\S]{0,80}?([\d.]+,\d{2})/i);
-  var mVl = text.match(/VALOR\s+L[IÍ]QUIDO[\s\S]{0,80}?([\d.]+,\d{2})/i);
-  var valorServico = mVs ? parseBRNumber(mVs[1]) : maxMoney;
+  // valor do serviço (bruto): tenta rótulos específicos; se falhar, cai no maior valor
+  function grabVal(re){ var m = text.match(re); return m ? parseBRNumber(m[1]) : NaN; }
+  var valorServico = grabVal(/VALOR\s+(?:DO\s+)?SERVI[ÇC]O\b[\s\S]{0,60}?([\d.]+,\d{2})/i);
+  if(isNaN(valorServico)) valorServico = grabVal(/VALOR\s+DA\s+OPERA[ÇC][AÃ]O\s*\/?\s*SERVI[ÇC]O[\s\S]{0,60}?([\d.]+,\d{2})/i);
+  if(isNaN(valorServico)) valorServico = grabVal(/VALOR\s+TOTAL\s+DA\s+NFS-?E[\s\S]{0,60}?([\d.]+,\d{2})/i);
+  if(isNaN(valorServico)) valorServico = maxMoney;
+  var mVl = text.match(/VALOR\s+L[IÍ]QUIDO\s+DA\s+NFS-?E[\s\S]{0,60}?([\d.]+,\d{2})/i)
+         || text.match(/VALOR\s+L[IÍ]QUIDO[\s\S]{0,80}?([\d.]+,\d{2})/i);
   // chave de acesso NFS-e nacional (44-50 dígitos), se houver
   var mCh = String(text||"").replace(/\s/g,"").match(/([0-9]{44,50})/);
   // nomes (melhor esforço, só para exibição) — corta em delimitadores e limita tamanho
@@ -453,15 +457,27 @@ function reconcile(txtBlocks, totvsRows, nfList, tol){
     // base de comparação: se há bruto no relatório, compara bruto; senão (só TOTVS) compara líquido
     var temBruto = dems.some(function(d){ return !isNaN(d.bruto); });
     var sumRef = dems.reduce(function(a,d){ return a + (temBruto ? (isNaN(d.bruto)?(isNaN(d.valorTotvs)?0:d.valorTotvs):d.bruto) : (isNaN(d.valorTotvs)?0:d.valorTotvs)); }, 0);
-    var sumNf = c.nfs.reduce(function(a,n){
+    // valores brutos de cada demonstrativo, para conferir presença no documento
+    var refVals = dems.map(function(d){ return temBruto ? (isNaN(d.bruto)?d.valorTotvs:d.bruto) : d.valorTotvs; }).filter(function(v){ return !isNaN(v); });
+    // todos os valores monetários citados no(s) documento(s) do grupo
+    var allMoneys = [];
+    c.nfs.forEach(function(n){ (n.moneys||[]).forEach(function(v){ allMoneys.push(v); }); });
+    // valor confere se: (a) cada valor do relatório aparece entre os valores do documento (à prova de layout), ou
+    //                   (b) a soma dos valores extraídos do documento bate com a soma do relatório
+    var refPresente = refVals.length > 0 && refVals.every(function(rv){ return allMoneys.some(function(mv){ return Math.abs(mv - rv) <= tol; }); });
+    var sumNfServ = c.nfs.reduce(function(a,n){
       var v = temBruto ? (!isNaN(n.valorServico)?n.valorServico:n.valorLiquido) : (!isNaN(n.valorLiquido)?n.valorLiquido:n.valorServico);
       return a + (isNaN(v)?0:v);
     }, 0);
+    var somaBate = !isNaN(sumNfServ) && Math.abs(sumNfServ - sumRef) <= tol;
+    var valorOk = refPresente || somaBate;
+    // para exibição: se o valor confere, mostra o valor do relatório (evita mostrar o número errado do layout)
+    var sumNf = valorOk ? sumRef : sumNfServ;
     var diff = sumNf - sumRef;
     var orfaos = uniq(c.orfaos);
     var status;
     if(dems.length === 0){ status = (orfaos.length > 0) ? "ORFA" : "SEM_NUM"; }
-    else if(Math.abs(diff) <= tol){ status = "NF_OK"; }
+    else if(valorOk){ status = "NF_OK"; }
     else { status = "NF_DIVERGE"; }
     var nomeOk = (dems.length > 0) && dems.every(function(d){
       return c.nfs.some(function(n){ return nameInText(d.comisNome, n.textUpper); });
@@ -1078,7 +1094,7 @@ function App(){
       <header>
         <div className="bar"></div>
         <div>
-          <h1>Checador de Comissão Registrada <span style={{fontSize:12,fontWeight:600,color:"var(--gold)",verticalAlign:"middle"}}>v16</span></h1>
+          <h1>Checador de Comissão Registrada <span style={{fontSize:12,fontWeight:600,color:"var(--gold)",verticalAlign:"middle"}}>v17</span></h1>
           <p>Demonstrativo (TXT) × TOTVS (CO) × Nota Fiscal / Relatório de comissão · Rede Gazeta</p>
         </div>
       </header>
