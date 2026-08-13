@@ -304,11 +304,12 @@ function parseRecibo(text, fileName){
   };
 }
 
-// procura um número de comissão dentro do texto (tolera zeros à esquerda e ponto de milhar)
+// procura um número de comissão dentro do texto (tolera zeros à esquerda e ponto de milhar,
+// mas NÃO casa quando o número é a parte inteira de um valor monetário, ex.: 1.320,00)
 function numInText(num, textUpper){
   if(!num || !textUpper) return false;
   var t = String(textUpper).replace(/(\d)\.(\d)/g, "$1$2"); // colapsa 134.250 -> 134250
-  return new RegExp("(^|[^0-9])0*" + num + "([^0-9]|$)").test(t);
+  return new RegExp("(^|[^0-9])0*" + num + "(?![0-9])(?!,\\d)").test(t);
 }
 
 // remove acentos
@@ -1096,7 +1097,7 @@ function App(){
       <header>
         <div className="bar"></div>
         <div>
-          <h1>Checador de Comissão Registrada <span style={{fontSize:12,fontWeight:600,color:"var(--gold)",verticalAlign:"middle"}}>v19</span></h1>
+          <h1>Checador de Comissão Registrada <span style={{fontSize:12,fontWeight:600,color:"var(--gold)",verticalAlign:"middle"}}>v20</span></h1>
           <p>Demonstrativo (TXT) × TOTVS (CO) × Nota Fiscal / Relatório de comissão · Rede Gazeta</p>
         </div>
       </header>
