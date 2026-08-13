@@ -496,6 +496,7 @@ function reconcile(txtBlocks, totvsRows, nfList, tol){
       d.nfNomeOk = nomeOk;
       d.compNome = uniq(c.nfs.map(function(n){ return n.prestador; }).filter(Boolean)).join(" / ");
       d.nfValor = sumNf;   // valor lido no documento (para exibir em caso de divergência)
+      d.nfRef = sumRef;    // valor correto (relatório) para a mensagem de divergência
     });
     return {
       nfs: c.nfs, dems: dems, sumNf: sumNf, sumBruto: sumRef, diff: diff,
@@ -1040,7 +1041,7 @@ function App(){
                 // descrição separada da divergência: quem diverge e por quê
                 var divergs = [];
                 if(g.status==="NF_DIVERGE"){
-                  divergs.push("Valor diverge — documento (NF/Relatório): " + fmt(g.sumNf) + "  ×  relatório de comissão (TXT): " + fmt(g.sumBruto) + "   →   diferença de " + fmt(Math.abs(g.diff)) + (g.diff>0?" (documento a mais)":" (documento a menos)"));
+                  divergs.push("Nota fiscal emitida com " + fmt(g.sumNf) + ", quando o correto seria " + fmt(g.sumBruto) + " (diferença de " + fmt(Math.abs(g.diff)) + ")");
                 }
                 if(g.dems.length>0 && !g.nomeOk){
                   divergs.push("Razão social diverge — no relatório: \"" + (comNomes||"—") + "\"   ×   no documento: \"" + (prestNomes||"—") + "\"" + (valorConfere ? ("   ·   o valor confere (TOTVS " + fmt(g.sumTotvs) + " / TXT " + fmt(g.sumTxt) + ") — provável só diferença de nome") : ""));
@@ -1095,7 +1096,7 @@ function App(){
       <header>
         <div className="bar"></div>
         <div>
-          <h1>Checador de Comissão Registrada <span style={{fontSize:12,fontWeight:600,color:"var(--gold)",verticalAlign:"middle"}}>v18</span></h1>
+          <h1>Checador de Comissão Registrada <span style={{fontSize:12,fontWeight:600,color:"var(--gold)",verticalAlign:"middle"}}>v19</span></h1>
           <p>Demonstrativo (TXT) × TOTVS (CO) × Nota Fiscal / Relatório de comissão · Rede Gazeta</p>
         </div>
       </header>
@@ -1174,7 +1175,7 @@ function App(){
                       <td className="num">{fmt(r.liquido)}</td>
                       <td className="num">{fmt(r.valorTotvs)}</td>
                       <td className="num" style={{color: (!isNaN(r.diff)&&Math.abs(r.diff)>tol)?"var(--err)":"inherit"}}>{fmt(r.diff)}</td>
-                      {hasComp?<td>{tagNf(r.nfStatus)}{r.nfRps?<span style={{color:"var(--gray)",fontSize:11}}> · NF nº {r.nfRps}</span>:null}{r.nfStatus==="NF_DIVERGE"?<span style={{color:"var(--err)",fontSize:11}}> · doc {fmt(r.nfValor)}</span>:null}</td>:null}
+                      {hasComp?<td>{tagNf(r.nfStatus)}{r.nfRps?<span style={{color:"var(--gray)",fontSize:11}}> · NF nº {r.nfRps}</span>:null}{r.nfStatus==="NF_DIVERGE"?<span style={{color:"var(--err)",fontSize:11}}> · emitida {fmt(r.nfValor)}, correto {fmt(r.nfRef)}</span>:null}</td>:null}
                       <td>{vencStr(r.vencto)}</td>
                     </tr>
                   );
