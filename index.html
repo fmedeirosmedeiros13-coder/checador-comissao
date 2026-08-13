@@ -285,6 +285,7 @@ function parseRecibo(text, fileName){
   while((mm = reM.exec(text)) !== null){ var v = parseBRNumber(mm[1]); if(!isNaN(v)) moneys.push(v); }
   var mBr = text.match(/COMISSAO\s+VALORES[\s\S]{0,80}?([\d.]+,\d{2})/i);
   var mLq = text.match(/VALOR\s+LIQUIDO[\s\S]{0,40}?([\d.]+,\d{2})/i);
+  var mIn = text.match(/INSS\s+([\d.]+,\d{2})/i);   // retenção INSS (pessoa física)
   var mNome = text.match(/NOME\s*:\s*([^\|\r\n]+)/i);
   var mEmp = text.match(/RECEB\(EMOS\)\s+DE\s+(.+?)\s+A\s+IMPORTANCIA/i);
   return {
@@ -296,6 +297,7 @@ function parseRecibo(text, fileName){
     moneys: moneys,
     valorServico: mBr ? parseBRNumber(mBr[1]) : NaN,   // bruto da comissão (não o faturamento)
     valorLiquido: mLq ? parseBRNumber(mLq[1]) : NaN,
+    inss: mIn ? parseBRNumber(mIn[1]) : NaN,
     prestador: mNome ? mNome[1].trim() : "",
     tomador: mEmp ? mEmp[1].trim() : "",
     chave: "",
@@ -511,6 +513,21 @@ function reconcile(txtBlocks, totvsRows, nfList, tol){
       d.compNome = uniq(c.nfs.map(function(n){ return n.prestador; }).filter(Boolean)).join(" / ");
       d.nfValor = sumNf;   // valor lido no documento (para exibir em caso de divergência)
       d.nfRef = sumRef;    // valor correto (relatório) para a mensagem de divergência
+      // Pessoa física: o recibo faz o papel do demonstrativo -> casa recibo × TOTVS
+      if(pf && d.status === "SO_TOTVS"){
+        var rec = c.nfs.filter(function(n){ return (n.tipo||"")==="Recibo"; })[0] || c.nfs[0];
+        if(rec){
+          d.bruto = rec.valorServico;
+          d.ir = isNaN(rec.inss) ? 0 : rec.inss;      // PF: retenção é INSS (mostrada na coluna IR/INSS)
+          d.liquido = rec.valorLiquido;
+          d.comisNome = d.comisNome || rec.prestador;
+          d.empNome = d.empNome || rec.tomador;
+          d.pf = true; d.origemRecibo = true;
+          var td = (isNaN(d.liquido)?0:d.liquido) - (isNaN(d.valorTotvs)?0:d.valorTotvs);
+          d.diff = td;
+          d.status = (Math.abs(td) <= tol) ? "OK" : "DIVERGE";
+        }
+      }
     });
     return {
       nfs: c.nfs, dems: dems, sumNf: sumNf, sumBruto: sumRef, diff: diff,
@@ -968,6 +985,8 @@ function App(){
     if(filter==="ALL") return results.rows;
     if(filter==="SEM_NF") return results.rows.filter(function(r){return r.status!=="SO_TOTVS" && r.nfStatus==="SEM_NF";});
     if(filter==="NF_DIVERGE") return results.rows.filter(function(r){return r.nfStatus==="NF_DIVERGE";});
+    if(filter==="PF") return results.rows.filter(function(r){return r.pf;});
+    if(filter==="PJ") return results.rows.filter(function(r){return !r.pf && r.status!=="SO_TOTVS";});
     return results.rows.filter(function(r){return r.status===filter;});
   },[results,filter]);
 
@@ -1110,7 +1129,7 @@ function App(){
       <header>
         <div className="bar"></div>
         <div>
-          <h1>Checador de Comissão Registrada <span style={{fontSize:12,fontWeight:600,color:"var(--gold)",verticalAlign:"middle"}}>v21</span></h1>
+          <h1>Checador de Comissão Registrada <span style={{fontSize:12,fontWeight:600,color:"var(--gold)",verticalAlign:"middle"}}>v22</span></h1>
           <p>Demonstrativo (TXT) × TOTVS (CO) × Nota Fiscal / Relatório de comissão · Rede Gazeta</p>
         </div>
       </header>
@@ -1160,7 +1179,7 @@ function App(){
           </div>
 
           <div className="filters">
-            {[["ALL","Todos"],["DIVERGE","Divergentes"],["OK","OK"],["SO_TXT","Só no TXT"],["SO_TOTVS","Só no TOTVS"]].concat(hasComp?[["SEM_NF","Sem NF/Relatório de comissão"],["NF_DIVERGE","Valor diverge"]]:[]).map(function(f){
+            {[["ALL","Todos"],["DIVERGE","Divergentes"],["OK","OK"],["SO_TXT","Só no TXT"],["SO_TOTVS","Só no TOTVS"],["PF","Pessoa física"],["PJ","Pessoa jurídica"]].concat(hasComp?[["SEM_NF","Sem NF/Relatório de comissão"],["NF_DIVERGE","Valor diverge"]]:[]).map(function(f){
               return <div key={f[0]} className={"chip"+(filter===f[0]?" active":"")} onClick={function(){setFilter(f[0]);}}>{f[1]}</div>;
             })}
           </div>
@@ -1170,7 +1189,7 @@ function App(){
               <thead>
                 <tr>
                   <th>Status</th><th>Emp</th><th>Nº Comissão / Título</th><th>Comissionado</th>
-                  <th>Fornec TOTVS</th><th className="num">Bruto (TXT)</th><th className="num">IR</th>
+                  <th>Fornec TOTVS</th><th className="num">Bruto (TXT)</th><th className="num">IR/INSS</th>
                   <th className="num">Líquido (TXT)</th><th className="num">Vl Original (TOTVS)</th>
                   <th className="num">Diferença</th>{hasComp?<th>NF/Relatório de comissão</th>:null}<th>Vencto</th>
                 </tr>
@@ -1182,7 +1201,7 @@ function App(){
                       <td>{tagOf(r.status)}</td>
                       <td>{r.empCode}{r.empNome?(" - "+r.empNome):""}</td>
                       <td>{r.numeroComissao}{r.nTitulos>1?(" ("+r.nTitulos+" tít.)"):""}</td>
-                      <td>{r.comisNome || r.compNome || "—"}{(!r.comisNome && r.compNome)?<span style={{color:"var(--gray)",fontSize:11}}> (da NF/Relatório de comissão)</span>:null}</td>
+                      <td>{r.comisNome || r.compNome || "—"}{r.pf?<span className="tag" style={{background:"#e8f1ee",color:"var(--teal)",marginLeft:6,fontSize:10}}>PF</span>:null}{(!r.comisNome && r.compNome && !r.pf)?<span style={{color:"var(--gray)",fontSize:11}}> (da NF/Relatório de comissão)</span>:null}</td>
                       <td>{r.fornecTotvs||"—"}</td>
                       <td className="num">{fmt(r.bruto)}</td>
                       <td className="num" style={{color:(!isNaN(r.ir)&&r.ir>0)?"var(--gold)":"inherit"}}>{fmt(r.ir)}</td>
