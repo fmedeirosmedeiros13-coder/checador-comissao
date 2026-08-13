@@ -328,19 +328,32 @@ function nameOverlap(a,b){
   tb.forEach(function(t){if(set[t]) hit++;});
   return hit;
 }
+// forma compacta (só letras/números) — usada quando o nome não gera tokens >=3 (ex.: "B&P")
+function nameCompact(s){
+  return deburr(String(s||"").toUpperCase()).replace(/\b(LTDA|EIRELI|EPP|ME|S\/?A|S\.A)\b/g,"").replace(/[^A-Z0-9]/g,"");
+}
 // nome do comissionado aparece no texto da NF? (à prova de layout)
 function nameInText(comisNome, textUpper){
+  if(!textUpper) return false;
   var toks = nameTokens(comisNome);
-  if(!toks.length || !textUpper) return false;
-  var hit = 0;
-  toks.forEach(function(t){ if(textUpper.indexOf(t) >= 0) hit++; });
-  return hit >= Math.min(2, toks.length); // pelo menos 2 tokens (ou todos, se tiver 1)
+  if(toks.length){
+    var hit = 0;
+    toks.forEach(function(t){ if(textUpper.indexOf(t) >= 0) hit++; });
+    return hit >= Math.min(2, toks.length); // pelo menos 2 tokens (ou todos, se tiver 1)
+  }
+  // nome curto sem tokens (ex.: "B&P"): compara forma compacta
+  var c = nameCompact(comisNome);
+  if(c.length >= 2){ return deburr(textUpper).replace(/[^A-Z0-9]/g,"").indexOf(c) >= 0; }
+  return false;
 }
 // versão frouxa: basta 1 token distintivo — usada só no fallback (já exige valor+empresa)
 function nameInTextLoose(comisNome, textUpper){
+  if(!textUpper) return false;
   var toks = nameTokens(comisNome);
-  if(!toks.length || !textUpper) return false;
-  return toks.some(function(t){ return textUpper.indexOf(t) >= 0; });
+  if(toks.length){ return toks.some(function(t){ return textUpper.indexOf(t) >= 0; }); }
+  var c = nameCompact(comisNome);
+  if(c.length >= 2){ return deburr(textUpper).replace(/[^A-Z0-9]/g,"").indexOf(c) >= 0; }
+  return false;
 }
 function uniq(arr){ var s={}, o=[]; arr.forEach(function(x){ if(!s[x]){ s[x]=true; o.push(x); } }); return o; }
 
@@ -1097,7 +1110,7 @@ function App(){
       <header>
         <div className="bar"></div>
         <div>
-          <h1>Checador de Comissão Registrada <span style={{fontSize:12,fontWeight:600,color:"var(--gold)",verticalAlign:"middle"}}>v20</span></h1>
+          <h1>Checador de Comissão Registrada <span style={{fontSize:12,fontWeight:600,color:"var(--gold)",verticalAlign:"middle"}}>v21</span></h1>
           <p>Demonstrativo (TXT) × TOTVS (CO) × Nota Fiscal / Relatório de comissão · Rede Gazeta</p>
         </div>
       </header>
