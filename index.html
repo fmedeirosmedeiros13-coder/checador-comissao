@@ -707,14 +707,14 @@ function App(){
   },[results]);
 
   const agencias = useMemo(function(){
-    if(!txtBlocks) return null;
+    if(!txtBlocks && !(recList && recList.length)) return null;
     var stMap = {};
     if(results){ results.rows.forEach(function(r){ stMap[r.empCode+"|"+r.numeroComissao] = r.nfStatus; }); }
     var byAg = {};
-    txtBlocks.forEach(function(b){
+    (txtBlocks || []).forEach(function(b){
       var nome = (b.comisNome||"(sem nome)").trim();
       var k = nome.toUpperCase();
-      if(!byAg[k]) byAg[k] = { nome:nome, bruto:0, ir:0, liquido:0, itens:[], comNF:0, semNF:0 };
+      if(!byAg[k]) byAg[k] = { nome:nome, bruto:0, ir:0, liquido:0, itens:[], comNF:0, semNF:0, pf:false };
       var a = byAg[k];
       if(!isNaN(b.totalBruto)) a.bruto += b.totalBruto;
       if(!isNaN(b.ir)) a.ir += b.ir;
@@ -723,13 +723,25 @@ function App(){
       if(results){ if(st==="NF_OK"||st==="NF_DIVERGE") a.comNF++; else a.semNF++; }
       a.itens.push({ num:b.numeroComissao, emp:b.empNome, bruto:b.totalBruto, liquido:b.totalLiquido, st:st });
     });
+    (recList || []).forEach(function(rec){
+      var nome = (rec.prestador||"(sem nome)").trim();
+      var k = nome.toUpperCase();
+      if(!byAg[k]) byAg[k] = { nome:nome, bruto:0, ir:0, liquido:0, itens:[], comNF:0, semNF:0, pf:false };
+      var a = byAg[k];
+      if(!isNaN(rec.valorServico)) a.bruto += rec.valorServico;
+      if(!isNaN(rec.inss)) a.ir += rec.inss;
+      if(!isNaN(rec.valorLiquido)) a.liquido += rec.valorLiquido;
+      if(results) a.comNF++;   // recibo é o próprio documento
+      a.pf = true;
+      a.itens.push({ num:rec.rps, emp:rec.tomador, bruto:rec.valorServico, liquido:rec.valorLiquido, st:"NF_OK", pf:true });
+    });
     var arr = Object.keys(byAg).map(function(k){ return byAg[k]; });
     arr.sort(function(x,y){ return y.bruto - x.bruto; });
     var totBruto = arr.reduce(function(a,x){return a+x.bruto;},0);
     var totLiq = arr.reduce(function(a,x){return a+x.liquido;},0);
     var totItens = arr.reduce(function(a,x){return a+x.itens.length;},0);
     return { arr:arr, totBruto:totBruto, totLiq:totLiq, totItens:totItens };
-  },[txtBlocks,results]);
+  },[txtBlocks,recList,results]);
 
   function agenciaSectionInner(){
     if(!agencias) return null;
@@ -737,7 +749,7 @@ function App(){
     var maxB = top.length ? top[0].bruto : 1;
     return (
       <div>
-        <p className="muted" style={{margin:"0 0 12px"}}>Somado a partir dos relatórios TXT, por razão social do comissionado.{results?" \"Pendente\" = comissões ainda sem NF/Relatório de comissão.":" Carregue NF/Relatório de comissão para ver o que está pendente."}</p>
+        <p className="muted" style={{margin:"0 0 12px"}}>Somado a partir dos relatórios TXT (PJ) e dos recibos (PF), por razão social do comissionado.{results?" \"Pendente\" = comissões ainda sem NF/Relatório de comissão.":" Carregue NF/Relatório de comissão para ver o que está pendente."}</p>
 
         <div style={{background:"#fff",border:"1px solid var(--line)",borderRadius:10,padding:"14px 16px",marginBottom:14}}>
           <div style={{fontSize:12,fontWeight:700,color:"var(--gray)",marginBottom:10}}>TOP 12 AGÊNCIAS POR VALOR BRUTO</div>
@@ -760,7 +772,7 @@ function App(){
             <thead>
               <tr>
                 <th style={{width:26}}></th><th>Agência (razão social)</th><th className="num">Comissões</th>
-                <th className="num">Σ Bruto</th><th className="num">Σ IR</th><th className="num">Σ Líquido</th>
+                <th className="num">Σ Bruto</th><th className="num">Σ IR/INSS</th><th className="num">Σ Líquido</th>
                 {results?<th className="num">Com NF/Relatório de comissão</th>:null}{results?<th className="num">Pendente</th>:null}
               </tr>
             </thead>
@@ -771,7 +783,7 @@ function App(){
                 var rows = [
                   <tr key={"a"+i} style={{cursor:"pointer"}} onClick={function(){ setOpenAg(function(o){ var n=Object.assign({},o); n[k]=!n[k]; return n; }); }}>
                     <td style={{textAlign:"center",color:"var(--gray)"}}>{isOpen?"▾":"▸"}</td>
-                    <td>{a.nome}</td>
+                    <td>{a.nome}{a.pf?<span className="tag" style={{background:"#e8f1ee",color:"var(--teal)",marginLeft:6,fontSize:10}}>PF</span>:null}</td>
                     <td className="num">{a.itens.length}</td>
                     <td className="num">{fmt(a.bruto)}</td>
                     <td className="num">{fmt(a.ir)}</td>
@@ -807,15 +819,18 @@ function App(){
   }
 
   const empresas = useMemo(function(){
-    if(!txtBlocks) return null;
+    if(!txtBlocks && !(recList && recList.length)) return null;
     var stMap = {};
     if(results){ results.rows.forEach(function(r){ stMap[r.empCode+"|"+r.numeroComissao] = r.nfStatus; }); }
     var byEmp = {};
-    txtBlocks.forEach(function(b){
+    function bucket(enome, code){
+      var ek = (enome||"").toUpperCase();
+      if(!byEmp[ek]) byEmp[ek] = { nome:enome, code:code, bruto:0, ir:0, liquido:0, comNF:0, semNF:0, n:0, ags:{} };
+      return byEmp[ek];
+    }
+    (txtBlocks || []).forEach(function(b){
       var enome = (b.empNome || ("Empresa "+b.empCode) || "(sem empresa)").trim();
-      var ek = enome.toUpperCase();
-      if(!byEmp[ek]) byEmp[ek] = { nome:enome, code:b.empCode, bruto:0, ir:0, liquido:0, comNF:0, semNF:0, n:0, ags:{} };
-      var e = byEmp[ek];
+      var e = bucket(enome, b.empCode);
       e.n++;
       if(!isNaN(b.totalBruto)) e.bruto += b.totalBruto;
       if(!isNaN(b.ir)) e.ir += b.ir;
@@ -831,6 +846,22 @@ function App(){
       if(!isNaN(b.totalLiquido)) a.liquido += b.totalLiquido;
       if(results){ if(temNF) a.comNF++; else a.semNF++; }
     });
+    (recList || []).forEach(function(rec){
+      var enome = (rec.tomador || "(sem empresa)").trim();
+      var e = bucket(enome, "");
+      e.n++; e.pf = true;
+      if(!isNaN(rec.valorServico)) e.bruto += rec.valorServico;
+      if(!isNaN(rec.inss)) e.ir += rec.inss;
+      if(!isNaN(rec.valorLiquido)) e.liquido += rec.valorLiquido;
+      if(results) e.comNF++;
+      var an = (rec.prestador||"(sem nome)").trim(), ak = an.toUpperCase();
+      if(!e.ags[ak]) e.ags[ak] = { nome:an, n:0, bruto:0, liquido:0, comNF:0, semNF:0, pf:true };
+      var a = e.ags[ak];
+      a.n++;
+      if(!isNaN(rec.valorServico)) a.bruto += rec.valorServico;
+      if(!isNaN(rec.valorLiquido)) a.liquido += rec.valorLiquido;
+      if(results) a.comNF++;
+    });
     var arr = Object.keys(byEmp).map(function(k){
       var e = byEmp[k];
       e.agList = Object.keys(e.ags).map(function(x){ return e.ags[x]; }).sort(function(a,b){ return b.bruto - a.bruto; });
@@ -840,7 +871,7 @@ function App(){
     var totBruto = arr.reduce(function(a,x){return a+x.bruto;},0);
     var totItens = arr.reduce(function(a,x){return a+x.n;},0);
     return { arr:arr, totBruto:totBruto, totItens:totItens };
-  },[txtBlocks,results]);
+  },[txtBlocks,recList,results]);
 
   function resumoEmpresaSection(){
     if(!empresas) return null;
@@ -848,7 +879,7 @@ function App(){
     var maxB = arr.length ? arr[0].bruto : 1;
     return (
       <div>
-        <p className="muted" style={{margin:"0 0 12px"}}>Somado a partir dos relatórios TXT, por empresa da Rede Gazeta. Clique numa empresa para ver as agências dela.{results?" \"Pendente\" = comissões ainda sem NF/Relatório de comissão.":""}</p>
+        <p className="muted" style={{margin:"0 0 12px"}}>Somado a partir dos relatórios TXT (PJ) e recibos (PF), por empresa da Rede Gazeta. Clique numa empresa para ver as agências dela.{results?" \"Pendente\" = comissões ainda sem NF/Relatório de comissão.":""}</p>
         <div style={{background:"#fff",border:"1px solid var(--line)",borderRadius:10,padding:"14px 16px",marginBottom:14}}>
           <div style={{fontSize:12,fontWeight:700,color:"var(--gray)",marginBottom:10}}>EMPRESAS DA REDE GAZETA POR VALOR BRUTO</div>
           {arr.map(function(e,i){
@@ -869,7 +900,7 @@ function App(){
             <thead>
               <tr>
                 <th style={{width:26}}></th><th>Empresa da Rede Gazeta</th><th className="num">Agências</th><th className="num">Comissões</th>
-                <th className="num">Σ Bruto</th><th className="num">Σ IR</th><th className="num">Σ Líquido</th>
+                <th className="num">Σ Bruto</th><th className="num">Σ IR/INSS</th><th className="num">Σ Líquido</th>
                 {results?<th className="num">Com NF/Relatório de comissão</th>:null}{results?<th className="num">Pendente</th>:null}
               </tr>
             </thead>
@@ -880,7 +911,7 @@ function App(){
                 var rows = [
                   <tr key={"e"+i} style={{cursor:"pointer"}} onClick={function(){ setOpenEmp(function(o){ var n=Object.assign({},o); n[k]=!n[k]; return n; }); }}>
                     <td style={{textAlign:"center",color:"var(--gray)"}}>{isOpen?"▾":"▸"}</td>
-                    <td style={{fontWeight:600}}>{e.nome}</td>
+                    <td style={{fontWeight:600}}>{e.nome}{e.pf?<span className="tag" style={{background:"#e8f1ee",color:"var(--teal)",marginLeft:6,fontSize:10,fontWeight:400}}>tem PF</span>:null}</td>
                     <td className="num">{e.agList.length}</td>
                     <td className="num">{e.n}</td>
                     <td className="num">{fmt(e.bruto)}</td>
@@ -1129,7 +1160,7 @@ function App(){
       <header>
         <div className="bar"></div>
         <div>
-          <h1>Checador de Comissão Registrada <span style={{fontSize:12,fontWeight:600,color:"var(--gold)",verticalAlign:"middle"}}>v22</span></h1>
+          <h1>Checador de Comissão Registrada <span style={{fontSize:12,fontWeight:600,color:"var(--gold)",verticalAlign:"middle"}}>v23</span></h1>
           <p>Demonstrativo (TXT) × TOTVS (CO) × Nota Fiscal / Relatório de comissão · Rede Gazeta</p>
         </div>
       </header>
@@ -1246,7 +1277,7 @@ function App(){
       {txtBlocks && !results ? (
         <p className="muted" style={{margin:"12px 0"}}>Carregue também o Excel do TOTVS para a conciliação completa — o resumo por agência abaixo já usa só os TXT.</p>
       ) : null}
-      {txtBlocks ? resumoSection() : null}
+      {(txtBlocks || (recList && recList.length)) ? resumoSection() : null}
       {!txtBlocks ? (
         <p className="muted" style={{marginTop:24}}>Carregue o TXT e o Excel para rodar a checagem. Notas Fiscais (PDF) e Recibos (TXT, pessoa física) são opcionais e habilitam a conferência da NF/Relatório de comissão.</p>
       ) : null}
