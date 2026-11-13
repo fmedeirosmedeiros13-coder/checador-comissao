@@ -225,6 +225,15 @@ function parseNf(text, fileName){
     var m; while((m = re.exec(textUpper)) !== null){ var n = normInt(m[1]); if(n) candSet[n] = true; }
   });
   var candidatos = Object.keys(candSet);
+  // faturas/NFs de cliente citadas na nota (para diagnóstico quando não casa por número)
+  var fatSet = {};
+  [ /N[FP]\s*(?:N[UÚ]MERO|N[ºO°.]|:)[\s:]*([0-9]{4,8})/gi,
+    /AUT\/?\s*FATURA?[^0-9]{0,16}?([0-9]{4,8})/gi,
+    /FATURA[^0-9]{0,12}?([0-9]{4,8})/gi
+  ].forEach(function(re){
+    var m; while((m = re.exec(textUpper)) !== null){ var n = normInt(m[1]); if(n) fatSet[n] = true; }
+  });
+  var faturasCitadas = Object.keys(fatSet);
   // todos os valores em R$ (BR)
   var moneys = [];
   var reM = /([0-9][0-9.]*,[0-9]{2})/g, mm;
@@ -258,6 +267,7 @@ function parseNf(text, fileName){
     tipo: "NF",
     pf: /\d{3}\.\d{3}\.\d{3}-\d{2}/.test(text),   // tem CPF => pessoa física
     candidatos: candidatos,
+    faturasCitadas: faturasCitadas,
     moneys: moneys,
     valorServico: valorServico,
     valorLiquido: mVl ? parseBRNumber(mVl[1]) : NaN,
@@ -985,7 +995,7 @@ function App(){
         <p className="muted" style={{margin:"0 0 10px"}}>NFs em que o sistema não achou o número da comissão (nota sem texto, imagem, ou número não localizado). Digite o número da comissão para casar na mão.</p>
         <div className="tblwrap">
           <table>
-            <thead><tr><th>Arquivo</th><th>Leitura</th><th>Nº encontrados</th><th>Digite o nº da comissão</th></tr></thead>
+            <thead><tr><th>Arquivo</th><th>Leitura</th><th>Nº comissão / faturas encontrados</th><th>Digite o nº da comissão</th></tr></thead>
             <tbody>
               {notasProblema.map(function(n,i){
                 var leitura = n.ocr ? <span className="tag warn">imagem (OCR)</span> : (n.noText ? <span className="tag err">sem texto</span> : <span className="tag">texto</span>);
@@ -993,7 +1003,11 @@ function App(){
                   <tr key={i}>
                     <td>{n.fileName}</td>
                     <td>{leitura}</td>
-                    <td>{(n.candidatos&&n.candidatos.length)?n.candidatos.join(", "):"—"}</td>
+                    <td>
+                      {(n.candidatos&&n.candidatos.length)?("comissão: "+n.candidatos.join(", ")):null}
+                      {(n.faturasCitadas&&n.faturasCitadas.length)?<span style={{color:"var(--gray)"}}>{(n.candidatos&&n.candidatos.length?" · ":"")+"faturas: "+n.faturasCitadas.join(", ")}</span>:null}
+                      {(!(n.candidatos&&n.candidatos.length)&&!(n.faturasCitadas&&n.faturasCitadas.length))?"—":null}
+                    </td>
                     <td>
                       <input type="text" inputMode="numeric" placeholder="ex.: 2452"
                         defaultValue={manualNums[n.fileName]||""}
@@ -1160,7 +1174,7 @@ function App(){
       <header>
         <div className="bar"></div>
         <div>
-          <h1>Checador de Comissão Registrada <span style={{fontSize:12,fontWeight:600,color:"var(--gold)",verticalAlign:"middle"}}>v23</span></h1>
+          <h1>Checador de Comissão Registrada <span style={{fontSize:12,fontWeight:600,color:"var(--gold)",verticalAlign:"middle"}}>v24</span></h1>
           <p>Demonstrativo (TXT) × TOTVS (CO) × Nota Fiscal / Relatório de comissão · Rede Gazeta</p>
         </div>
       </header>
